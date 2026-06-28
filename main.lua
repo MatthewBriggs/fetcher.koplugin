@@ -97,13 +97,11 @@ function ReaderSync:syncOPDS()
     local opds_settings = opds_settings_store:readSetting("settings", {})
     local servers = opds_settings_store:readSetting("servers", {})
     local downloads = opds_settings_store:readSetting("downloads", {})
-    local pending_syncs = opds_settings_store:readSetting("pending_syncs", {})
 
     if not opds_settings.sync_dir then
         return false, _("OPDS sync folder not set. Configure it in the OPDS Catalog plugin (Sync > Set sync folder).")
     end
 
-    -- Filter to only selected catalogs
     local selected_map = {}
     for _, url in ipairs(catalog_urls) do
         selected_map[url] = true
@@ -113,7 +111,7 @@ function ReaderSync:syncOPDS()
         if selected_map[server.url] then
             local s = {}
             for k, v in pairs(server) do s[k] = v end
-            s.sync = true  -- force sync regardless of OPDS plugin setting
+            s.sync = true
             table.insert(sync_servers, s)
         end
     end
@@ -138,7 +136,6 @@ function ReaderSync:syncOPDS()
         sync_server_list = {},
     }
 
-    -- Populate the pending download list for each selected catalog
     for _, server in ipairs(sync_servers) do
         browser:fillPendingSyncs(server)
     end
@@ -148,20 +145,23 @@ function ReaderSync:syncOPDS()
         return true, _("Books: up to date ✓")
     end
 
-    -- Download each book with a per-book progress message
     local http = require("socket.http")
     local ltn12 = require("ltn12")
     local socket = require("socket")
     local socketutil = require("socketutil")
+    local ProgressbarDialog = require("ui/widget/progressbardialog")
+
+    local downloaded_urls = self:getSetting("downloaded_urls", {})
 
     local dl_count = 0
     for i, item in ipairs(pending) do
         local filename = item.file:match("([^/]+)$") or item.file
 
-        if not lfs.attributes(item.file) then
-            -- First do a HEAD request to get Content-Length
+        if not force and downloaded_urls[item.url] then
+            -- already downloaded in a previous sync, skip regardless of filename
+        elseif not lfs.attributes(item.file) then
             socketutil:set_timeout()
-            local _body, code, headers = http.request{
+            local _body, _code, headers = http.request{
                 method = "HEAD",
                 url = item.url,
                 user = item.username,
@@ -170,24 +170,25 @@ function ReaderSync:syncOPDS()
                 headers = { ["Accept-Encoding"] = "identity" },
             }
             socketutil:reset_timeout()
-            local total_bytes = (type(headers) == "table") and tonumber(headers["content-length"]) or 0
+            local total_bytes = (type(headers) == "table") and tonumber(headers["content-length"]) or nil
 
-            self:showStatus(T(_("Downloading %1 of %2:\n%3\n0%"), i, #pending, filename))
+            local progress_dialog = ProgressbarDialog:new{
+                title = T(_("Downloading %1 of %2"), i, #pending),
+                subtitle = filename,
+                progress_max = total_bytes,
+                refresh_time_seconds = 1,
+            }
+            self:closeStatus()
+            progress_dialog:show()
+            UIManager:forceRePaint()
 
             local file_sink = ltn12.sink.file(io.open(item.file, "w"))
-            local last_pct = -1
             local progress_sink = socketutil.chainSinkWithProgressCallback(file_sink, function(bytes)
-                if total_bytes > 0 then
-                    local pct = math.floor(bytes / total_bytes * 100)
-                    if pct ~= last_pct then
-                        last_pct = pct
-                        self:showStatus(T(_("Downloading %1 of %2:\n%3\n%4%"), i, #pending, filename, pct))
-                    end
-                end
+                progress_dialog:reportProgress(bytes)
             end)
 
             socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
-            local code = socket.skip(1, http.request{
+            local dl_code = socket.skip(1, http.request{
                 url = item.url,
                 headers = { ["Accept-Encoding"] = "identity" },
                 sink = progress_sink,
@@ -195,16 +196,18 @@ function ReaderSync:syncOPDS()
                 password = item.password,
             })
             socketutil:reset_timeout()
+            progress_dialog:close()
 
-            if code == 200 then
+            if dl_code == 200 then
                 dl_count = dl_count + 1
+                downloaded_urls[item.url] = true
+                self:saveSetting("downloaded_urls", downloaded_urls)
             else
                 os.remove(item.file)
             end
         end
     end
 
-    -- Flush updated last_download pointers back to OPDS settings
     for _, synced in ipairs(sync_servers) do
         for _, server in ipairs(servers) do
             if server.url == synced.url then
@@ -219,30 +222,284 @@ function ReaderSync:syncOPDS()
     return true, T(_("Books: %1 downloaded ✓"), dl_count)
 end
 
--- KOReader update -----------------------------------------------------------
+-- Patch sync ----------------------------------------------------------------
 
-function ReaderSync:syncKOReader()
-    OTAManager:fetchAndProcessUpdate()
+function ReaderSync:genPatchMenuItems()
+    local lfs = require("libs/libkoreader-lfs")
+    local patches_dir = DataStorage:getDataDir() .. "/patches"
+
+    -- Collect known names: prefer cached release assets, fall back to local files
+    local known_set = {}
+    local known_patches = self:getSetting("known_patches", {})
+    for _i, repo_names in pairs(known_patches) do
+        for _j, name in ipairs(repo_names) do
+            known_set[name] = true
+        end
+    end
+    if lfs.attributes(patches_dir, "mode") == "directory" then
+        for file in lfs.dir(patches_dir) do
+            if file:match("%.lua$") then known_set[file] = true end
+        end
+    end
+
+    local items = {}
+    for filename in pairs(known_set) do
+        items[#items + 1] = {
+            text = filename,
+            checked_func = function()
+                local disabled = self:getSetting("disabled_patches", {})
+                for _i, f in ipairs(disabled) do
+                    if f == filename then return false end
+                end
+                return true
+            end,
+            callback = function()
+                local disabled = self:getSetting("disabled_patches", {})
+                local found = false
+                for i, f in ipairs(disabled) do
+                    if f == filename then
+                        table.remove(disabled, i)
+                        found = true
+                        break
+                    end
+                end
+                if not found then
+                    table.insert(disabled, filename)
+                end
+                self:saveSetting("disabled_patches", disabled)
+            end,
+        }
+    end
+
+    if #items == 0 then
+        return {{ text = _("No patches known yet — run a sync first"), enabled = false }}
+    end
+    table.sort(items, function(a, b) return a.text < b.text end)
+    return items
+end
+
+
+function ReaderSync:genSourceMenuItems()
+    local sources = self:getSources()
+    if #sources == 0 then
+        return {{
+            text = _("No sources configured — edit settings/readersync_sources.lua"),
+            enabled = false,
+        }}
+    end
+    local items = {}
+    for _i, source in ipairs(sources) do
+        local repo = source.repo
+        if repo then
+            items[#items + 1] = {
+                text = repo,
+                checked_func = function()
+                    local disabled = self:getSetting("disabled_patch_repos", {})
+                    for _j, r in ipairs(disabled) do
+                        if r == repo then return false end
+                    end
+                    return true
+                end,
+                callback = function()
+                    local disabled = self:getSetting("disabled_patch_repos", {})
+                    local found = false
+                    for _j, r in ipairs(disabled) do
+                        if r == repo then
+                            table.remove(disabled, _j)
+                            found = true
+                            break
+                        end
+                    end
+                    if not found then
+                        table.insert(disabled, repo)
+                    end
+                    self:saveSetting("disabled_patch_repos", disabled)
+                end,
+            }
+        end
+    end
+    return items
+end
+
+function ReaderSync:getSources()
+    local lfs = require("libs/libkoreader-lfs")
+    local sources_file = DataStorage:getSettingsDir() .. "/readersync_sources.lua"
+    if not lfs.attributes(sources_file) then return {} end
+    local ok, sources = pcall(dofile, sources_file)
+    if not ok or type(sources) ~= "table" then return {} end
+    return sources
+end
+
+function ReaderSync:syncPatches()
+    local T = require("ffi/util").template
+    local sources = self:getSources()
+    if #sources == 0 then
+        return true, _("Patches: no sources configured")
+    end
+
+    local https = require("ssl.https")
+    local ltn12 = require("ltn12")
+    local json = require("rapidjson")
+    local socket = require("socket")
+    local socketutil = require("socketutil")
+    local lfs = require("libs/libkoreader-lfs")
+    local ProgressbarDialog = require("ui/widget/progressbardialog")
+
+    local patches_dir = DataStorage:getDataDir() .. "/patches"
+    if not lfs.attributes(patches_dir) then
+        lfs.mkdir(patches_dir)
+    end
+
+    local function githubGet(url)
+        local chunks = {}
+        socketutil:set_timeout()
+        local _body, code = https.request{
+            url = url,
+            headers = {
+                ["Accept"] = "application/vnd.github+json",
+                ["User-Agent"] = "ReaderSync-KOReader",
+            },
+            sink = ltn12.sink.table(chunks),
+        }
+        socketutil:reset_timeout()
+        if code ~= 200 then return nil end
+        local ok, data = pcall(json.decode, table.concat(chunks))
+        return ok and data or nil
+    end
+
+    local function resolveRedirect(url)
+        local current = url
+        for _i = 1, 5 do
+            socketutil:set_timeout()
+            local _resp, code, resp_headers = https.request{
+                url = current,
+                method = "HEAD",
+                headers = { ["User-Agent"] = "ReaderSync-KOReader" },
+                sink = ltn12.sink.null(),
+            }
+            socketutil:reset_timeout()
+            if code == 301 or code == 302 or code == 303 or code == 307 or code == 308 then
+                local loc = resp_headers and resp_headers.location
+                if not loc then break end
+                current = loc
+            else
+                break
+            end
+        end
+        return current
+    end
+
+    local installed_tags = self:getSetting("patch_installed_tags", {})
+    local disabled_repos = self:getSetting("disabled_patch_repos", {})
+    local disabled_set = {}
+    for _i, r in ipairs(disabled_repos) do disabled_set[r] = true end
+    local disabled_patches = self:getSetting("disabled_patches", {})
+    local disabled_patch_set = {}
+    for _i, f in ipairs(disabled_patches) do disabled_patch_set[f] = true end
+
+    local updated_count = 0
+    local failed = {}
+
+    for _i, source in ipairs(sources) do
+        local repo = source.repo
+        if repo and not disabled_set[repo] then
+            local repo_short = repo:match("[^/]+$") or repo
+            self:showStatus(_("Patches"), T(_("Checking %1…"), repo_short))
+
+            local release = githubGet("https://api.github.com/repos/" .. repo .. "/releases/latest")
+            if not release or not release.tag_name then
+                table.insert(failed, repo_short)
+            elseif release.tag_name ~= installed_tags[repo] then
+                local assets = release.assets or {}
+                -- Cache known patch names so the menu can show them before download
+                local known = self:getSetting("known_patches", {})
+                local repo_known = {}
+                for _j, asset in ipairs(assets) do
+                    if asset.name:match("%.lua$") then
+                        table.insert(repo_known, asset.name)
+                    end
+                end
+                known[repo] = repo_known
+                self:saveSetting("known_patches", known)
+
+                local repo_count = 0
+                for _j, asset in ipairs(assets) do
+                    if asset.name:match("%.lua$") and not disabled_patch_set[asset.name] then
+                        local dest = patches_dir .. "/" .. asset.name
+                        local final_url = resolveRedirect(asset.browser_download_url)
+
+                        local progress_dialog = ProgressbarDialog:new{
+                            title = _("Updating patches"),
+                            subtitle = asset.name,
+                            progress_max = (asset.size and asset.size > 0) and asset.size or nil,
+                            refresh_time_seconds = 1,
+                        }
+                        self:closeStatus()
+                        progress_dialog:show()
+                        UIManager:forceRePaint()
+
+                        local file_sink = ltn12.sink.file(io.open(dest, "w"))
+                        local progress_sink = socketutil.chainSinkWithProgressCallback(file_sink, function(bytes)
+                            progress_dialog:reportProgress(bytes)
+                        end)
+
+                        socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
+                        local dl_code = socket.skip(1, https.request{
+                            url = final_url,
+                            headers = {
+                                ["User-Agent"] = "ReaderSync-KOReader",
+                                ["Accept-Encoding"] = "identity",
+                            },
+                            sink = progress_sink,
+                        })
+                        socketutil:reset_timeout()
+                        progress_dialog:close()
+
+                        if dl_code == 200 then
+                            repo_count = repo_count + 1
+                        else
+                            os.remove(dest)
+                        end
+                    end
+                end
+
+                if repo_count > 0 then
+                    updated_count = updated_count + repo_count
+                    installed_tags[repo] = release.tag_name
+                    self:saveSetting("patch_installed_tags", installed_tags)
+                end
+            end
+        end
+    end
+
+    if #failed > 0 then
+        return false, T(_("Patches: %1 updated, failed: %2"), updated_count, table.concat(failed, ", ")), updated_count > 0
+    end
+    if updated_count > 0 then
+        return true, T(_("Patches: %1 updated ✓"), updated_count), true
+    end
+    return true, _("Patches: up to date ✓"), false
 end
 
 -- Status dialog helper ------------------------------------------------------
 
-function ReaderSync:showStatus(text)
-    if self._status_msg then
-        UIManager:close(self._status_msg)
+function ReaderSync:showStatus(title, subtitle)
+    if self._status_dialog then
+        UIManager:close(self._status_dialog)
     end
-    self._status_msg = InfoMessage:new{
-        text = "ReaderSync\n\n" .. text,
-        show_icon = false,
+    local ProgressbarDialog = require("ui/widget/progressbardialog")
+    self._status_dialog = ProgressbarDialog:new{
+        title = title,
+        subtitle = subtitle,
     }
-    UIManager:show(self._status_msg)
+    UIManager:show(self._status_dialog)
     UIManager:forceRePaint()
 end
 
 function ReaderSync:closeStatus()
-    if self._status_msg then
-        UIManager:close(self._status_msg)
-        self._status_msg = nil
+    if self._status_dialog then
+        UIManager:close(self._status_dialog)
+        self._status_dialog = nil
     end
 end
 
@@ -250,19 +507,20 @@ end
 
 function ReaderSync:runSync()
     NetworkMgr:runWhenOnline(function()
-        local enable_update = self:getSetting("enable_koreader_update", true)
-        local enable_opds   = self:getSetting("enable_opds_sync", true)
+        local enable_update  = self:getSetting("enable_koreader_update", true)
+        local enable_opds    = self:getSetting("enable_opds_sync", true)
         local T = require("ffi/util").template
         local lines = {}
 
         -- Step 1: KOReader update
         local ota_version, ota_package
         if enable_update then
-            self:showStatus(_("Checking for KOReader update…"))
+            self:showStatus(_("KOReader Update"), _("Checking for updates…"))
             if OTAManager:getOTAType() == "none" then
                 table.insert(lines, _("KOReader: emulator — skipping update"))
             else
-                ota_version, _, _, ota_package = OTAManager:checkUpdate()
+                local _lv, _lk
+                ota_version, _lv, _lk, ota_package = OTAManager:checkUpdate()
                 if ota_version == 0 then
                     table.insert(lines, _("KOReader: up to date ✓"))
                 elseif ota_version then
@@ -275,24 +533,48 @@ function ReaderSync:runSync()
 
         -- Step 2: OPDS books
         if enable_opds then
-            self:showStatus(_("Checking for new books…"))
+            self:showStatus(_("Books"), _("Checking for new books…"))
             local ok, msg = self:syncOPDS()
-            table.insert(lines, msg or _("Books: sync complete ✓"))
+            table.insert(lines, msg or _("Books: up to date ✓"))
+        end
+
+        -- Step 3: Patches
+        local patches_need_restart = false
+        self:showStatus(_("Patches"), _("Checking for updates…"))
+        local pcall_ok, _sync_ok, msg, needs_restart = pcall(function() return self:syncPatches() end)
+        if not pcall_ok then
+            table.insert(lines, "Patches: error — " .. tostring(_sync_ok))
+        else
+            table.insert(lines, msg or _("Patches: up to date ✓"))
+            patches_need_restart = needs_restart or false
         end
 
         -- Final summary
         table.insert(lines, "")
         table.insert(lines, _("Sync complete."))
         self:closeStatus()
-        UIManager:show(InfoMessage:new{
-            text = table.concat(lines, "\n"),
-        })
 
-        -- If OTA update is available, show confirm dialog after summary dismisses
         if ota_version and ota_version ~= 0 then
             UIManager:scheduleIn(4, function()
                 OTAManager:fetchAndProcessUpdate()
             end)
+        end
+
+        local summary_text = table.concat(lines, "\n")
+        if patches_need_restart then
+            local ConfirmBox = require("ui/widget/confirmbox")
+            UIManager:show(ConfirmBox:new{
+                text = summary_text .. "\n" .. _("Restart KOReader to apply new patches?"),
+                ok_text = _("Restart"),
+                cancel_text = _("Later"),
+                ok_callback = function()
+                    UIManager:restartKOReader()
+                end,
+            })
+        else
+            UIManager:show(InfoMessage:new{
+                text = summary_text,
+            })
         end
     end)
 end
@@ -320,6 +602,7 @@ end
 function ReaderSync:addToMainMenu(menu_items)
     menu_items.readersync = {
         text = _("ReaderSync"),
+        sorting_hint = "tools",
         sub_item_table = {
             {
                 text = _("Sync now"),
@@ -366,6 +649,18 @@ function ReaderSync:addToMainMenu(menu_items)
                         callback = function()
                             local v = self:getSetting("opds_force_resync", false)
                             self:saveSetting("opds_force_resync", not v)
+                        end,
+                    },
+                    {
+                        text = _("Patch sources…"),
+                        sub_item_table_func = function()
+                            return self:genSourceMenuItems()
+                        end,
+                    },
+                    {
+                        text = _("Individual patches…"),
+                        sub_item_table_func = function()
+                            return self:genPatchMenuItems()
                         end,
                     },
                 },
