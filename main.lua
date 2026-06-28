@@ -225,20 +225,12 @@ end
 -- Patch sync ----------------------------------------------------------------
 
 function ReaderSync:genPatchMenuItems()
-    local lfs = require("libs/libkoreader-lfs")
-    local patches_dir = DataStorage:getDataDir() .. "/patches"
-
-    -- Collect known names: prefer cached release assets, fall back to local files
+    -- Only show patches from configured repos (known_patches cache populated by sync)
     local known_set = {}
     local known_patches = self:getSetting("known_patches", {})
     for _i, repo_names in pairs(known_patches) do
         for _j, name in ipairs(repo_names) do
             known_set[name] = true
-        end
-    end
-    if lfs.attributes(patches_dir, "mode") == "directory" then
-        for file in lfs.dir(patches_dir) do
-            if file:match("%.lua$") then known_set[file] = true end
         end
     end
 
