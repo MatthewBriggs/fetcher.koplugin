@@ -1,0 +1,34 @@
+-- Fetcher extra sources (optional)
+--
+-- Copy this file to your KOReader settings directory as `fetcher_sources.lua`
+-- to add your own sources on top of the built-ins. For example:
+--
+--   Kobo:    .adds/koreader/settings/fetcher_sources.lua
+--   Kindle:  koreader/settings/fetcher_sources.lua
+--   Desktop: ~/.config/koreader/settings/fetcher_sources.lua
+--
+-- Each entry is a table describing one GitHub repo. Two kinds are supported:
+--
+--   * Patch source  — the repo's latest release ships individual `.lua` patch
+--                     files as assets; they go into KOReader's `patches/`
+--                     directory. This is the default when no `type` is given.
+--
+--   * Plugin source — a whole plugin distributed as a single `.zip` release
+--                     asset, extracted into your `plugins/` directory. Set
+--                     `type = "plugin"`.
+--
+-- Only repos you list here (plus Fetcher's built-ins) are ever touched.
+-- Toggle any of them on/off in Fetcher → Settings → Plugin/Patch sources.
+
+return {
+    -- Patch source example: release assets are *.lua files -> patches/
+    {
+        repo = "youruser/koreader-patches",
+    },
+
+    -- Plugin source example: release ships a single .zip -> plugins/
+    -- {
+    --     repo = "youruser/coolplugin.koplugin",
+    --     type = "plugin",
+    -- },
+}

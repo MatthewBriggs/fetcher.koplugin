@@ -46,6 +46,29 @@ function Fetcher:saveSetting(key, value)
     self.settings:flush()
 end
 
+-- On first run, the built-in ZIP_PLUGIN_REPOS start disabled so a fresh
+-- install never installs plugins the user didn't explicitly ask for. They
+-- still appear (one tap away) under "Plugin sources…". Fetcher's own repo is
+-- deliberately NOT seeded — self-update is on by default. A plugin that is
+-- already installed on this device is left enabled, so existing setups keep
+-- updating rather than silently going stale.
+function Fetcher:seedDefaultDisabledPlugins()
+    if self:getSetting("builtin_defaults_seeded", false) then return end
+    local lfs = require("libs/libkoreader-lfs")
+    local parent = self:getPluginsParentDir()
+    local disabled = self:getSetting("disabled_patch_repos", {})
+    local present = {}
+    for _, r in ipairs(disabled) do present[r] = true end
+    for _, repo in ipairs(ZIP_PLUGIN_REPOS) do
+        local dir = parent .. (repo:match("[^/]+$") or repo)
+        if not present[repo] and not lfs.attributes(dir) then
+            table.insert(disabled, repo)
+        end
+    end
+    self:saveSetting("disabled_patch_repos", disabled)
+    self:saveSetting("builtin_defaults_seeded", true)
+end
+
 -- One-time migration for the ReaderSync → Fetcher rename: the old settings
 -- files (readersync.lua = disabled repos / installed tags / catalog picks,
 -- readersync_sources.lua = user-configured patch sources) are orphaned once
@@ -404,6 +427,15 @@ function Fetcher:getSources()
     end
     for i = #built_ins, 1, -1 do
         table.insert(sources, 1, built_ins[i])
+    end
+
+    -- Backfill a destination dir for user-configured plugin sources that
+    -- didn't specify one, so `{ repo = "u/x.koplugin", type = "plugin" }`
+    -- installs to plugins/<basename>/ just like the built-ins.
+    for _, source in ipairs(sources) do
+        if source.repo and source.type == "plugin" and not source.dir then
+            source.dir = plugins_parent_dir .. (source.repo:match("[^/]+$") or source.repo) .. "/"
+        end
     end
     return sources
 end
@@ -871,6 +903,7 @@ end
 
 function Fetcher:init()
     self:migrateLegacySettings()
+    self:seedDefaultDisabledPlugins()
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
 end

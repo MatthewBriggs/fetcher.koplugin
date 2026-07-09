@@ -1,0 +1,7 @@
+# macOS
+.DS_Store
+._*
+
+# Build output
+/build/
+/fetcher.koplugin.zip

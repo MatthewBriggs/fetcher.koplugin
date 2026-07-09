@@ -1,6 +1,6 @@
 return {
     name = "fetcher",
-    version = "0.4.0",
+    version = "0.5.0",
     fullname = "Fetcher",
     description = "One-tap sync: update KOReader, fetch books, and keep plugins (including itself) up to date.",
 }
