@@ -276,12 +276,6 @@ end
 
 function Fetcher:genSourceMenuItems()
     local sources = self:getSources()
-    if #sources == 0 then
-        return {{
-            text = _("No sources configured — edit settings/fetcher_sources.lua"),
-            enabled = false,
-        }}
-    end
     local items = {}
     for _i, source in ipairs(sources) do
         local repo = source.repo
@@ -319,18 +313,27 @@ end
 function Fetcher:getSources()
     local lfs = require("libs/libkoreader-lfs")
     local sources_file = DataStorage:getSettingsDir() .. "/fetcher_sources.lua"
-    if not lfs.attributes(sources_file) then return {} end
-    local ok, sources = pcall(dofile, sources_file)
-    if not ok or type(sources) ~= "table" then return {} end
+    local sources = {}
+    if lfs.attributes(sources_file) then
+        local ok, file_sources = pcall(dofile, sources_file)
+        if ok and type(file_sources) == "table" then
+            sources = file_sources
+        end
+    end
+    -- Fetcher updates itself the same way it updates any other plugin repo:
+    -- it's just a built-in source, toggleable in "Patch sources…" like the rest.
+    table.insert(sources, 1, {
+        repo = SELF_REPO,
+        type = "plugin",
+        dir = self:getSelfDir(),
+        files = SELF_FILES,
+    })
     return sources
 end
 
 function Fetcher:syncPatches()
     local T = require("ffi/util").template
     local sources = self:getSources()
-    if #sources == 0 then
-        return true, _("Patches: no sources configured")
-    end
 
     local https = require("ssl.https")
     local ltn12 = require("ltn12")
@@ -404,6 +407,43 @@ function Fetcher:syncPatches()
             local release = githubGet("https://api.github.com/repos/" .. repo .. "/releases/latest")
             if not release or not release.tag_name then
                 table.insert(failed, repo_short)
+            elseif release.tag_name ~= installed_tags[repo] and source.type == "plugin" then
+                local downloaded = {}
+                for _k, filename in ipairs(source.files) do
+                    local url = "https://raw.githubusercontent.com/" .. repo .. "/" .. release.tag_name .. "/" .. filename
+                    local dest = source.dir .. filename .. ".new"
+
+                    socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
+                    local dl_code = socket.skip(1, https.request{
+                        url = url,
+                        headers = {
+                            ["User-Agent"] = "Fetcher-KOReader",
+                            ["Accept-Encoding"] = "identity",
+                        },
+                        sink = ltn12.sink.file(io.open(dest, "w")),
+                    })
+                    socketutil:reset_timeout()
+
+                    if dl_code == 200 then
+                        table.insert(downloaded, filename)
+                    else
+                        os.remove(dest)
+                    end
+                end
+
+                if #downloaded == #source.files then
+                    for _k, filename in ipairs(source.files) do
+                        os.rename(source.dir .. filename .. ".new", source.dir .. filename)
+                    end
+                    updated_count = updated_count + 1
+                    installed_tags[repo] = release.tag_name
+                    self:saveSetting("patch_installed_tags", installed_tags)
+                else
+                    for _k, filename in ipairs(downloaded) do
+                        os.remove(source.dir .. filename .. ".new")
+                    end
+                    table.insert(failed, repo_short)
+                end
             elseif release.tag_name ~= installed_tags[repo] then
                 local assets = release.assets or {}
                 -- Cache known patch names so the menu can show them before download
@@ -476,94 +516,11 @@ function Fetcher:syncPatches()
     return true, _("Patches: up to date ✓"), false
 end
 
--- Self-update -----------------------------------------------------------------
-
 -- Directory this plugin is running from, e.g. ".../plugins/fetcher.koplugin/"
 function Fetcher:getSelfDir()
     local source = debug.getinfo(1, "S").source
     if source:sub(1, 1) == "@" then source = source:sub(2) end
     return source:match("^(.*/)") or "./"
-end
-
-function Fetcher:selfUpdate()
-    local T = require("ffi/util").template
-    local https = require("ssl.https")
-    local ltn12 = require("ltn12")
-    local json = require("rapidjson")
-    local socket = require("socket")
-    local socketutil = require("socketutil")
-
-    local function githubGet(url)
-        local chunks = {}
-        socketutil:set_timeout()
-        local _body, code = https.request{
-            url = url,
-            headers = {
-                ["Accept"] = "application/vnd.github+json",
-                ["User-Agent"] = "Fetcher-KOReader",
-            },
-            sink = ltn12.sink.table(chunks),
-        }
-        socketutil:reset_timeout()
-        if code ~= 200 then return nil end
-        local ok, data = pcall(json.decode, table.concat(chunks))
-        return ok and data or nil
-    end
-
-    local release = githubGet("https://api.github.com/repos/" .. SELF_REPO .. "/releases/latest")
-    if not release or not release.tag_name then
-        return false, _("Fetcher: update check failed")
-    end
-
-    -- First run after installing this feature: adopt the latest tag without
-    -- downloading, since we have no reliable installed-version marker yet.
-    local installed_tag = self:getSetting("self_installed_tag")
-    if not installed_tag then
-        self:saveSetting("self_installed_tag", release.tag_name)
-        return true, _("Fetcher: up to date ✓"), false
-    end
-
-    if release.tag_name == installed_tag then
-        return true, _("Fetcher: up to date ✓"), false
-    end
-
-    local dir = self:getSelfDir()
-    local downloaded = {}
-    for _, filename in ipairs(SELF_FILES) do
-        local url = "https://raw.githubusercontent.com/" .. SELF_REPO .. "/" .. release.tag_name .. "/" .. filename
-        local dest = dir .. filename .. ".new"
-
-        socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
-        local dl_code = socket.skip(1, https.request{
-            url = url,
-            headers = {
-                ["User-Agent"] = "Fetcher-KOReader",
-                ["Accept-Encoding"] = "identity",
-            },
-            sink = ltn12.sink.file(io.open(dest, "w")),
-        })
-        socketutil:reset_timeout()
-
-        if dl_code == 200 then
-            table.insert(downloaded, filename)
-        else
-            os.remove(dest)
-        end
-    end
-
-    if #downloaded ~= #SELF_FILES then
-        for _, filename in ipairs(downloaded) do
-            os.remove(dir .. filename .. ".new")
-        end
-        return false, T(_("Fetcher: update to %1 failed"), release.tag_name)
-    end
-
-    for _, filename in ipairs(SELF_FILES) do
-        os.rename(dir .. filename .. ".new", dir .. filename)
-    end
-
-    self:saveSetting("self_installed_tag", release.tag_name)
-    return true, T(_("Fetcher: updated to %1 ✓"), release.tag_name), true
 end
 
 -- Status dialog helper ------------------------------------------------------
@@ -592,26 +549,12 @@ end
 
 function Fetcher:runSync()
     NetworkMgr:runWhenOnline(function()
-        local enable_self_update = self:getSetting("enable_self_update", true)
         local enable_update  = self:getSetting("enable_koreader_update", true)
         local enable_opds    = self:getSetting("enable_opds_sync", true)
         local T = require("ffi/util").template
         local lines = {}
-        local needs_restart = false
 
-        -- Step 1: Self-update
-        if enable_self_update then
-            self:showStatus(_("Fetcher"), _("Checking for updates…"))
-            local pcall_ok, _ok, msg, restart = pcall(function() return self:selfUpdate() end)
-            if not pcall_ok then
-                table.insert(lines, "Fetcher: error — " .. tostring(_ok))
-            else
-                table.insert(lines, msg or _("Fetcher: up to date ✓"))
-                needs_restart = needs_restart or (restart or false)
-            end
-        end
-
-        -- Step 2: KOReader update
+        -- Step 1: KOReader update
         local ota_version, ota_package
         if enable_update then
             self:showStatus(_("KOReader Update"), _("Checking for updates…"))
@@ -630,21 +573,22 @@ function Fetcher:runSync()
             end
         end
 
-        -- Step 3: OPDS books
+        -- Step 2: OPDS books
         if enable_opds then
             self:showStatus(_("Books"), _("Checking for new books…"))
             local ok, msg = self:syncOPDS()
             table.insert(lines, msg or _("Books: up to date ✓"))
         end
 
-        -- Step 4: Patches
+        -- Step 3: Patches (and plugin self-update, same source list)
+        local needs_restart = false
         self:showStatus(_("Patches"), _("Checking for updates…"))
         local pcall_ok, _sync_ok, msg, patches_restart = pcall(function() return self:syncPatches() end)
         if not pcall_ok then
             table.insert(lines, "Patches: error — " .. tostring(_sync_ok))
         else
             table.insert(lines, msg or _("Patches: up to date ✓"))
-            needs_restart = needs_restart or (patches_restart or false)
+            needs_restart = patches_restart or false
         end
 
         -- Final summary
@@ -709,16 +653,6 @@ function Fetcher:addToMainMenu(menu_items)
             {
                 text = _("Settings"),
                 sub_item_table = {
-                    {
-                        text = _("Enable self-update"),
-                        checked_func = function()
-                            return self:getSetting("enable_self_update", true)
-                        end,
-                        callback = function()
-                            local v = self:getSetting("enable_self_update", true)
-                            self:saveSetting("enable_self_update", not v)
-                        end,
-                    },
                     {
                         text = _("KOReader update channel"),
                         sub_item_table = OTAManager:genChannelList(),
