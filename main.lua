@@ -13,7 +13,7 @@ local SELF_FILES = { "main.lua", "_meta.lua" }
 
 -- Built-in plugin sources distributed as a single prebuilt release .zip
 -- (unlike SELF_FILES, these repos have many files across subdirectories, so
--- the fixed-file-list mechanism doesn't generalize — see syncPatches()).
+-- the fixed-file-list mechanism doesn't generalize — see syncSources()).
 local ZIP_PLUGIN_REPOS = {
     "AnthonyGress/zen_ui.koplugin",
     "AndyHazz/bookends.koplugin",
@@ -44,6 +44,34 @@ function Fetcher:saveSetting(key, value)
     self:loadSettings()
     self.settings:saveSetting(key, value)
     self.settings:flush()
+end
+
+-- One-time migration for the ReaderSync → Fetcher rename: the old settings
+-- files (readersync.lua = disabled repos / installed tags / catalog picks,
+-- readersync_sources.lua = user-configured patch sources) are orphaned once
+-- the code starts reading fetcher.lua / fetcher_sources.lua. Copy them over
+-- if the new files don't exist yet, so nothing the user configured is lost.
+function Fetcher:migrateLegacySettings()
+    local lfs = require("libs/libkoreader-lfs")
+    local dir = DataStorage:getSettingsDir()
+    local pairs_to_migrate = {
+        { old = dir .. "/readersync.lua",         new = dir .. "/fetcher.lua" },
+        { old = dir .. "/readersync_sources.lua", new = dir .. "/fetcher_sources.lua" },
+    }
+    for _, m in ipairs(pairs_to_migrate) do
+        if not lfs.attributes(m.new) and lfs.attributes(m.old) then
+            local inf = io.open(m.old, "r")
+            if inf then
+                local content = inf:read("*a")
+                inf:close()
+                local outf = io.open(m.new, "w")
+                if outf then
+                    outf:write(content)
+                    outf:close()
+                end
+            end
+        end
+    end
 end
 
 -- OPDS catalog list ---------------------------------------------------------
@@ -370,7 +398,7 @@ function Fetcher:getSources()
             type = "plugin",
             dir = plugins_parent_dir .. repo:match("[^/]+$") .. "/",
             -- no `files` field: that absence routes this source through the
-            -- zip-extraction branch in syncPatches() instead of the
+            -- zip-extraction branch in syncSources() instead of the
             -- fixed-file-list branch self uses.
         })
     end
@@ -380,7 +408,10 @@ function Fetcher:getSources()
     return sources
 end
 
-function Fetcher:syncPatches()
+-- Sync all sources: plugins (whole-plugin updates, incl. Fetcher itself) and
+-- patches (individual .lua files). Returns needs_restart plus two summary
+-- lines so the caller can report plugins and patches separately.
+function Fetcher:syncSources()
     local T = require("ffi/util").template
     local sources = self:getSources()
 
@@ -525,18 +556,21 @@ function Fetcher:syncPatches()
     local disabled_patch_set = {}
     for _i, f in ipairs(disabled_patches) do disabled_patch_set[f] = true end
 
-    local updated_count = 0
-    local failed = {}
+    -- Plugins and patches are counted and reported separately (they are
+    -- different things, even though both are updated from GitHub releases).
+    local plugin_updated, plugin_failed = 0, {}
+    local patch_updated, patch_failed = 0, {}
 
     for _i, source in ipairs(sources) do
         local repo = source.repo
         if repo and not disabled_set[repo] then
             local repo_short = repo:match("[^/]+$") or repo
-            self:showStatus(_("Patches"), T(_("Checking %1…"), repo_short))
+            local is_plugin = source.type == "plugin"
+            self:showStatus(is_plugin and _("Plugins") or _("Patches"), T(_("Checking %1…"), repo_short))
 
             local release = githubGet("https://api.github.com/repos/" .. repo .. "/releases/latest")
             if not release or not release.tag_name then
-                table.insert(failed, repo_short)
+                table.insert(is_plugin and plugin_failed or patch_failed, repo_short)
             elseif release.tag_name ~= installed_tags[repo] and source.type == "plugin" and source.files then
                 local downloaded = {}
                 for _k, filename in ipairs(source.files) do
@@ -565,19 +599,19 @@ function Fetcher:syncPatches()
                     for _k, filename in ipairs(source.files) do
                         os.rename(source.dir .. filename .. ".new", source.dir .. filename)
                     end
-                    updated_count = updated_count + 1
+                    plugin_updated = plugin_updated + 1
                     installed_tags[repo] = release.tag_name
                     self:saveSetting("patch_installed_tags", installed_tags)
                 else
                     for _k, filename in ipairs(downloaded) do
                         os.remove(source.dir .. filename .. ".new")
                     end
-                    table.insert(failed, repo_short)
+                    table.insert(plugin_failed, repo_short)
                 end
             elseif release.tag_name ~= installed_tags[repo] and source.type == "plugin" then
                 local zip_asset = findZipAsset(release.assets)
                 if not zip_asset then
-                    table.insert(failed, repo_short)
+                    table.insert(plugin_failed, repo_short)
                 else
                     local tmp_zip = fetcher_tmp_dir .. "/" .. repo_short .. ".zip"
                     local final_url = resolveRedirect(zip_asset.browser_download_url)
@@ -611,23 +645,23 @@ function Fetcher:syncPatches()
 
                     if dl_code ~= 200 then
                         os.remove(tmp_zip)
-                        table.insert(failed, repo_short)
+                        table.insert(plugin_failed, repo_short)
                     else
                         util.makePath(source.dir) -- fresh install: create if missing
                         local reader = Archiver.Reader:new()
                         if not reader:open(tmp_zip) then
                             os.remove(tmp_zip)
-                            table.insert(failed, repo_short)
+                            table.insert(plugin_failed, repo_short)
                         else
                             local extract_ok = extractZip(reader, source.dir)
                             reader:close()
                             os.remove(tmp_zip)
                             if extract_ok then
-                                updated_count = updated_count + 1
+                                plugin_updated = plugin_updated + 1
                                 installed_tags[repo] = release.tag_name
                                 self:saveSetting("patch_installed_tags", installed_tags)
                             else
-                                table.insert(failed, repo_short)
+                                table.insert(plugin_failed, repo_short)
                             end
                         end
                     end
@@ -687,7 +721,7 @@ function Fetcher:syncPatches()
                 end
 
                 if repo_count > 0 then
-                    updated_count = updated_count + repo_count
+                    patch_updated = patch_updated + repo_count
                     installed_tags[repo] = release.tag_name
                     self:saveSetting("patch_installed_tags", installed_tags)
                 end
@@ -695,13 +729,20 @@ function Fetcher:syncPatches()
         end
     end
 
-    if #failed > 0 then
-        return false, T(_("Patches: %1 updated, failed: %2"), updated_count, table.concat(failed, ", ")), updated_count > 0
+    local function summarize(label, updated, failed)
+        if #failed > 0 then
+            return T(_("%1: %2 updated, failed: %3"), label, updated, table.concat(failed, ", "))
+        end
+        if updated > 0 then
+            return T(_("%1: %2 updated ✓"), label, updated)
+        end
+        return T(_("%1: up to date ✓"), label)
     end
-    if updated_count > 0 then
-        return true, T(_("Patches: %1 updated ✓"), updated_count), true
-    end
-    return true, _("Patches: up to date ✓"), false
+
+    local plugin_line = summarize(_("Plugins"), plugin_updated, plugin_failed)
+    local patch_line = summarize(_("Patches"), patch_updated, patch_failed)
+    local needs_restart = plugin_updated > 0 or patch_updated > 0
+    return needs_restart, plugin_line, patch_line
 end
 
 -- Directory this plugin is running from, e.g. ".../plugins/fetcher.koplugin/"
@@ -775,15 +816,16 @@ function Fetcher:runSync()
             table.insert(lines, msg or _("Books: up to date ✓"))
         end
 
-        -- Step 3: Patches (and plugin self-update, same source list)
+        -- Step 3: Plugins and patches (reported as separate lines)
         local needs_restart = false
-        self:showStatus(_("Patches"), _("Checking for updates…"))
-        local pcall_ok, _sync_ok, msg, patches_restart = pcall(function() return self:syncPatches() end)
+        self:showStatus(_("Plugins & patches"), _("Checking for updates…"))
+        local pcall_ok, restart, plugin_line, patch_line = pcall(function() return self:syncSources() end)
         if not pcall_ok then
-            table.insert(lines, "Patches: error — " .. tostring(_sync_ok))
+            table.insert(lines, "Plugins & patches: error — " .. tostring(restart))
         else
-            table.insert(lines, msg or _("Patches: up to date ✓"))
-            needs_restart = patches_restart or false
+            table.insert(lines, plugin_line or _("Plugins: up to date ✓"))
+            table.insert(lines, patch_line or _("Patches: up to date ✓"))
+            needs_restart = restart or false
         end
 
         -- Final summary
@@ -828,6 +870,7 @@ function Fetcher:onDispatcherRegisterActions()
 end
 
 function Fetcher:init()
+    self:migrateLegacySettings()
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
 end
