@@ -283,38 +283,65 @@ function Fetcher:genPatchMenuItems()
 end
 
 
-function Fetcher:genSourceMenuItems()
-    local sources = self:getSources()
+-- Build a toggle menu item for a single source repo. Plugins and patches
+-- share the same disabled_patch_repos set, but are shown in separate menus.
+function Fetcher:genRepoToggleItem(repo)
+    return {
+        text = repo,
+        checked_func = function()
+            local disabled = self:getSetting("disabled_patch_repos", {})
+            for _j, r in ipairs(disabled) do
+                if r == repo then return false end
+            end
+            return true
+        end,
+        callback = function()
+            local disabled = self:getSetting("disabled_patch_repos", {})
+            local found = false
+            for _j, r in ipairs(disabled) do
+                if r == repo then
+                    table.remove(disabled, _j)
+                    found = true
+                    break
+                end
+            end
+            if not found then
+                table.insert(disabled, repo)
+            end
+            self:saveSetting("disabled_patch_repos", disabled)
+        end,
+    }
+end
+
+-- Plugin sources: whole plugins updated from a repo (type == "plugin"),
+-- including Fetcher itself and the bundled zip plugins.
+function Fetcher:genPluginMenuItems()
     local items = {}
-    for _i, source in ipairs(sources) do
-        local repo = source.repo
-        if repo then
-            items[#items + 1] = {
-                text = repo,
-                checked_func = function()
-                    local disabled = self:getSetting("disabled_patch_repos", {})
-                    for _j, r in ipairs(disabled) do
-                        if r == repo then return false end
-                    end
-                    return true
-                end,
-                callback = function()
-                    local disabled = self:getSetting("disabled_patch_repos", {})
-                    local found = false
-                    for _j, r in ipairs(disabled) do
-                        if r == repo then
-                            table.remove(disabled, _j)
-                            found = true
-                            break
-                        end
-                    end
-                    if not found then
-                        table.insert(disabled, repo)
-                    end
-                    self:saveSetting("disabled_patch_repos", disabled)
-                end,
-            }
+    for _i, source in ipairs(self:getSources()) do
+        if source.repo and source.type == "plugin" then
+            items[#items + 1] = self:genRepoToggleItem(source.repo)
         end
+    end
+    if #items == 0 then
+        return {{ text = _("No plugin sources configured"), enabled = false }}
+    end
+    return items
+end
+
+-- Patch sources: repos whose releases ship individual .lua patch files
+-- (the legacy, user-configured sources — not whole plugins).
+function Fetcher:genSourceMenuItems()
+    local items = {}
+    for _i, source in ipairs(self:getSources()) do
+        if source.repo and source.type ~= "plugin" then
+            items[#items + 1] = self:genRepoToggleItem(source.repo)
+        end
+    end
+    if #items == 0 then
+        return {{
+            text = _("No sources configured — edit settings/fetcher_sources.lua"),
+            enabled = false,
+        }}
     end
     return items
 end
@@ -330,8 +357,9 @@ function Fetcher:getSources()
         end
     end
     -- Built-ins always come first, fixed order: Fetcher itself, then the
-    -- bundled zip-distributed plugins, then user-configured sources. All
-    -- are toggleable in "Patch sources…" like any other source.
+    -- bundled zip-distributed plugins, then user-configured patch sources.
+    -- Plugin sources (type == "plugin") are toggled in "Plugin sources…";
+    -- patch sources in "Patch sources…".
     local plugins_parent_dir = self:getPluginsParentDir()
     local built_ins = {
         { repo = SELF_REPO, type = "plugin", dir = self:getSelfDir(), files = SELF_FILES },
@@ -858,6 +886,12 @@ function Fetcher:addToMainMenu(menu_items)
                         callback = function()
                             local v = self:getSetting("opds_force_resync", false)
                             self:saveSetting("opds_force_resync", not v)
+                        end,
+                    },
+                    {
+                        text = _("Plugin sources…"),
+                        sub_item_table_func = function()
+                            return self:genPluginMenuItems()
                         end,
                     },
                     {
