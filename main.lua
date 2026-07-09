@@ -11,6 +11,15 @@ local _ = require("gettext")
 local SELF_REPO = "MatthewBriggs/fetcher.koplugin"
 local SELF_FILES = { "main.lua", "_meta.lua" }
 
+-- Built-in plugin sources distributed as a single prebuilt release .zip
+-- (unlike SELF_FILES, these repos have many files across subdirectories, so
+-- the fixed-file-list mechanism doesn't generalize — see syncPatches()).
+local ZIP_PLUGIN_REPOS = {
+    "AnthonyGress/zen_ui.koplugin",
+    "AndyHazz/bookends.koplugin",
+    "Euphoriyy/appearance.koplugin",
+}
+
 local Fetcher = WidgetContainer:extend{
     name = "fetcher",
     settings_file = DataStorage:getSettingsDir() .. "/fetcher.lua",
@@ -320,14 +329,26 @@ function Fetcher:getSources()
             sources = file_sources
         end
     end
-    -- Fetcher updates itself the same way it updates any other plugin repo:
-    -- it's just a built-in source, toggleable in "Patch sources…" like the rest.
-    table.insert(sources, 1, {
-        repo = SELF_REPO,
-        type = "plugin",
-        dir = self:getSelfDir(),
-        files = SELF_FILES,
-    })
+    -- Built-ins always come first, fixed order: Fetcher itself, then the
+    -- bundled zip-distributed plugins, then user-configured sources. All
+    -- are toggleable in "Patch sources…" like any other source.
+    local plugins_parent_dir = self:getPluginsParentDir()
+    local built_ins = {
+        { repo = SELF_REPO, type = "plugin", dir = self:getSelfDir(), files = SELF_FILES },
+    }
+    for _, repo in ipairs(ZIP_PLUGIN_REPOS) do
+        table.insert(built_ins, {
+            repo = repo,
+            type = "plugin",
+            dir = plugins_parent_dir .. repo:match("[^/]+$") .. "/",
+            -- no `files` field: that absence routes this source through the
+            -- zip-extraction branch in syncPatches() instead of the
+            -- fixed-file-list branch self uses.
+        })
+    end
+    for i = #built_ins, 1, -1 do
+        table.insert(sources, 1, built_ins[i])
+    end
     return sources
 end
 
@@ -342,10 +363,17 @@ function Fetcher:syncPatches()
     local socketutil = require("socketutil")
     local lfs = require("libs/libkoreader-lfs")
     local ProgressbarDialog = require("ui/widget/progressbardialog")
+    local util = require("util")
+    local Archiver = require("ffi/archiver")
 
     local patches_dir = DataStorage:getDataDir() .. "/patches"
     if not lfs.attributes(patches_dir) then
         lfs.mkdir(patches_dir)
+    end
+
+    local fetcher_tmp_dir = DataStorage:getDataDir() .. "/fetcher_tmp"
+    if not lfs.attributes(fetcher_tmp_dir) then
+        lfs.mkdir(fetcher_tmp_dir)
     end
 
     local function githubGet(url)
@@ -387,6 +415,80 @@ function Fetcher:syncPatches()
         return current
     end
 
+    local function findZipAsset(assets)
+        for _, asset in ipairs(assets or {}) do
+            if asset.name:match("%.zip$") then
+                return asset
+            end
+        end
+    end
+
+    local function hasDotDotSegment(path)
+        for seg in path:gmatch("[^/]+") do
+            if seg == ".." then return true end
+        end
+        return false
+    end
+
+    local function collectZipFilePaths(reader)
+        local paths = {}
+        for entry in reader:iterate() do
+            if entry.mode == "file" then
+                table.insert(paths, entry.path)
+            end
+        end
+        return paths
+    end
+
+    -- If every entry shares the same first "/"-delimited segment (root-wrapped
+    -- zip, e.g. "zen_ui.koplugin/main.lua"), return that segment to strip;
+    -- otherwise nil (flat zip).
+    local function detectZipRootPrefix(paths)
+        local prefix
+        for _, path in ipairs(paths) do
+            local seg = path:match("^([^/]+)/")
+            if not seg then return nil end
+            if prefix == nil then
+                prefix = seg
+            elseif seg ~= prefix then
+                return nil
+            end
+        end
+        return prefix
+    end
+
+    -- Extract every file in an open Archiver.Reader into dest_dir (created as
+    -- needed). Auto-strips a common root prefix if present. All-or-nothing:
+    -- any unsafe or failed entry aborts the whole extraction (matches the
+    -- self-update branch's semantics — a partial failure is retried whole
+    -- next sync, not left half-applied).
+    local function extractZip(reader, dest_dir)
+        local paths = collectZipFilePaths(reader)
+        if #paths == 0 then return false end
+        local prefix = detectZipRootPrefix(paths)
+        for _, path in ipairs(paths) do
+            local rel = path
+            if prefix then
+                local head = rel:sub(1, #prefix + 1)
+                if head == prefix .. "/" then
+                    rel = rel:sub(#prefix + 2)
+                else
+                    rel = nil -- stray entry outside the shared root
+                end
+            end
+            if not rel or rel == "" or rel:sub(1, 1) == "/" or hasDotDotSegment(rel) then
+                return false -- zip-slip guard / unexpected layout: reject whole archive
+            end
+            local dest_path = dest_dir .. rel
+            local parent_dir = dest_path:match("^(.*)/")
+            if parent_dir then util.makePath(parent_dir) end
+            if not reader:extractToPath(path, dest_path) then
+                return false
+            end
+        end
+        return true
+    end
+
     local installed_tags = self:getSetting("patch_installed_tags", {})
     local disabled_repos = self:getSetting("disabled_patch_repos", {})
     local disabled_set = {}
@@ -407,7 +509,7 @@ function Fetcher:syncPatches()
             local release = githubGet("https://api.github.com/repos/" .. repo .. "/releases/latest")
             if not release or not release.tag_name then
                 table.insert(failed, repo_short)
-            elseif release.tag_name ~= installed_tags[repo] and source.type == "plugin" then
+            elseif release.tag_name ~= installed_tags[repo] and source.type == "plugin" and source.files then
                 local downloaded = {}
                 for _k, filename in ipairs(source.files) do
                     local url = "https://raw.githubusercontent.com/" .. repo .. "/" .. release.tag_name .. "/" .. filename
@@ -443,6 +545,64 @@ function Fetcher:syncPatches()
                         os.remove(source.dir .. filename .. ".new")
                     end
                     table.insert(failed, repo_short)
+                end
+            elseif release.tag_name ~= installed_tags[repo] and source.type == "plugin" then
+                local zip_asset = findZipAsset(release.assets)
+                if not zip_asset then
+                    table.insert(failed, repo_short)
+                else
+                    local tmp_zip = fetcher_tmp_dir .. "/" .. repo_short .. ".zip"
+                    local final_url = resolveRedirect(zip_asset.browser_download_url)
+
+                    local progress_dialog = ProgressbarDialog:new{
+                        title = T(_("Installing %1"), repo_short),
+                        subtitle = zip_asset.name,
+                        progress_max = (zip_asset.size and zip_asset.size > 0) and zip_asset.size or nil,
+                        refresh_time_seconds = 1,
+                    }
+                    self:closeStatus()
+                    progress_dialog:show()
+                    UIManager:forceRePaint()
+
+                    local file_sink = ltn12.sink.file(io.open(tmp_zip, "w"))
+                    local progress_sink = socketutil.chainSinkWithProgressCallback(file_sink, function(bytes)
+                        progress_dialog:reportProgress(bytes)
+                    end)
+
+                    socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
+                    local dl_code = socket.skip(1, https.request{
+                        url = final_url,
+                        headers = {
+                            ["User-Agent"] = "Fetcher-KOReader",
+                            ["Accept-Encoding"] = "identity",
+                        },
+                        sink = progress_sink,
+                    })
+                    socketutil:reset_timeout()
+                    progress_dialog:close()
+
+                    if dl_code ~= 200 then
+                        os.remove(tmp_zip)
+                        table.insert(failed, repo_short)
+                    else
+                        util.makePath(source.dir) -- fresh install: create if missing
+                        local reader = Archiver.Reader:new()
+                        if not reader:open(tmp_zip) then
+                            os.remove(tmp_zip)
+                            table.insert(failed, repo_short)
+                        else
+                            local extract_ok = extractZip(reader, source.dir)
+                            reader:close()
+                            os.remove(tmp_zip)
+                            if extract_ok then
+                                updated_count = updated_count + 1
+                                installed_tags[repo] = release.tag_name
+                                self:saveSetting("patch_installed_tags", installed_tags)
+                            else
+                                table.insert(failed, repo_short)
+                            end
+                        end
+                    end
                 end
             elseif release.tag_name ~= installed_tags[repo] then
                 local assets = release.assets or {}
@@ -521,6 +681,13 @@ function Fetcher:getSelfDir()
     local source = debug.getinfo(1, "S").source
     if source:sub(1, 1) == "@" then source = source:sub(2) end
     return source:match("^(.*/)") or "./"
+end
+
+-- Parent of Fetcher's own plugin directory, i.e. KOReader's plugins/ dir,
+-- e.g. ".../plugins/". Built-in zip plugins install as siblings here.
+function Fetcher:getPluginsParentDir()
+    local self_dir = self:getSelfDir() -- ".../plugins/fetcher.koplugin/"
+    return self_dir:match("^(.*/)[^/]+/$") or self_dir
 end
 
 -- Status dialog helper ------------------------------------------------------

@@ -41,3 +41,20 @@ present in the source list, toggleable from **Patch sources…** like any other
 repo. On sync, if the repo's latest GitHub release tag differs from the last
 installed tag, it downloads `main.lua` and `_meta.lua` from that tag and
 replaces the running files, then prompts a restart.
+
+## Built-in plugin updates
+
+Fetcher also keeps these plugins up to date, installing them fresh if
+they're not already present:
+
+- [ZenUI](https://github.com/AnthonyGress/zen_ui.koplugin)
+- [Bookends](https://github.com/AndyHazz/bookends.koplugin)
+- [Appearance](https://github.com/Euphoriyy/appearance.koplugin)
+
+Unlike self-update's fixed two-file list, these are distributed as a single
+`.zip` release asset per repo (the standard KOReader plugin release format).
+Fetcher downloads the zip, auto-detects whether its contents are wrapped in
+a root folder or flat, and extracts it into a sibling directory of Fetcher's
+own (e.g. `plugins/zen_ui.koplugin/`), creating the directory if it doesn't
+exist yet. Each is toggleable from **Patch sources…**, same as any other
+source.
