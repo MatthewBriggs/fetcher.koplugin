@@ -8,27 +8,30 @@ local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local _ = require("gettext")
 
-local ReaderSync = WidgetContainer:extend{
-    name = "readersync",
-    settings_file = DataStorage:getSettingsDir() .. "/readersync.lua",
+local SELF_REPO = "MatthewBriggs/fetcher.koplugin"
+local SELF_FILES = { "main.lua", "_meta.lua" }
+
+local Fetcher = WidgetContainer:extend{
+    name = "fetcher",
+    settings_file = DataStorage:getSettingsDir() .. "/fetcher.lua",
     settings = nil,
 }
 
 -- Settings ------------------------------------------------------------------
 
-function ReaderSync:loadSettings()
+function Fetcher:loadSettings()
     if self.settings then return end
     self.settings = LuaSettings:open(self.settings_file)
 end
 
-function ReaderSync:getSetting(key, default)
+function Fetcher:getSetting(key, default)
     self:loadSettings()
     local v = self.settings:readSetting(key)
     if v == nil then return default end
     return v
 end
 
-function ReaderSync:saveSetting(key, value)
+function Fetcher:saveSetting(key, value)
     self:loadSettings()
     self.settings:saveSetting(key, value)
     self.settings:flush()
@@ -36,13 +39,13 @@ end
 
 -- OPDS catalog list ---------------------------------------------------------
 
-function ReaderSync:getOPDSServers()
+function Fetcher:getOPDSServers()
     local opds_file = DataStorage:getSettingsDir() .. "/opds.lua"
     local opds_settings = LuaSettings:open(opds_file)
     return opds_settings:readSetting("servers", {})
 end
 
-function ReaderSync:genCatalogMenuItems()
+function Fetcher:genCatalogMenuItems()
     local servers = self:getOPDSServers()
     if #servers == 0 then
         return {{
@@ -86,10 +89,10 @@ end
 
 -- OPDS sync -----------------------------------------------------------------
 
-function ReaderSync:syncOPDS()
+function Fetcher:syncOPDS()
     local catalog_urls = self:getSetting("opds_catalog_urls", {})
     if #catalog_urls == 0 then
-        return false, _("No catalogs selected for sync. Configure in ReaderSync settings.")
+        return false, _("No catalogs selected for sync. Configure in Fetcher settings.")
     end
 
     local opds_file = DataStorage:getSettingsDir() .. "/opds.lua"
@@ -224,7 +227,7 @@ end
 
 -- Patch sync ----------------------------------------------------------------
 
-function ReaderSync:genPatchMenuItems()
+function Fetcher:genPatchMenuItems()
     -- Only show patches from configured repos (known_patches cache populated by sync)
     local known_set = {}
     local known_patches = self:getSetting("known_patches", {})
@@ -271,11 +274,11 @@ function ReaderSync:genPatchMenuItems()
 end
 
 
-function ReaderSync:genSourceMenuItems()
+function Fetcher:genSourceMenuItems()
     local sources = self:getSources()
     if #sources == 0 then
         return {{
-            text = _("No sources configured — edit settings/readersync_sources.lua"),
+            text = _("No sources configured — edit settings/fetcher_sources.lua"),
             enabled = false,
         }}
     end
@@ -313,16 +316,16 @@ function ReaderSync:genSourceMenuItems()
     return items
 end
 
-function ReaderSync:getSources()
+function Fetcher:getSources()
     local lfs = require("libs/libkoreader-lfs")
-    local sources_file = DataStorage:getSettingsDir() .. "/readersync_sources.lua"
+    local sources_file = DataStorage:getSettingsDir() .. "/fetcher_sources.lua"
     if not lfs.attributes(sources_file) then return {} end
     local ok, sources = pcall(dofile, sources_file)
     if not ok or type(sources) ~= "table" then return {} end
     return sources
 end
 
-function ReaderSync:syncPatches()
+function Fetcher:syncPatches()
     local T = require("ffi/util").template
     local sources = self:getSources()
     if #sources == 0 then
@@ -349,7 +352,7 @@ function ReaderSync:syncPatches()
             url = url,
             headers = {
                 ["Accept"] = "application/vnd.github+json",
-                ["User-Agent"] = "ReaderSync-KOReader",
+                ["User-Agent"] = "Fetcher-KOReader",
             },
             sink = ltn12.sink.table(chunks),
         }
@@ -366,7 +369,7 @@ function ReaderSync:syncPatches()
             local _resp, code, resp_headers = https.request{
                 url = current,
                 method = "HEAD",
-                headers = { ["User-Agent"] = "ReaderSync-KOReader" },
+                headers = { ["User-Agent"] = "Fetcher-KOReader" },
                 sink = ltn12.sink.null(),
             }
             socketutil:reset_timeout()
@@ -439,7 +442,7 @@ function ReaderSync:syncPatches()
                         local dl_code = socket.skip(1, https.request{
                             url = final_url,
                             headers = {
-                                ["User-Agent"] = "ReaderSync-KOReader",
+                                ["User-Agent"] = "Fetcher-KOReader",
                                 ["Accept-Encoding"] = "identity",
                             },
                             sink = progress_sink,
@@ -473,9 +476,99 @@ function ReaderSync:syncPatches()
     return true, _("Patches: up to date ✓"), false
 end
 
+-- Self-update -----------------------------------------------------------------
+
+-- Directory this plugin is running from, e.g. ".../plugins/fetcher.koplugin/"
+function Fetcher:getSelfDir()
+    local source = debug.getinfo(1, "S").source
+    if source:sub(1, 1) == "@" then source = source:sub(2) end
+    return source:match("^(.*/)") or "./"
+end
+
+function Fetcher:selfUpdate()
+    local T = require("ffi/util").template
+    local https = require("ssl.https")
+    local ltn12 = require("ltn12")
+    local json = require("rapidjson")
+    local socket = require("socket")
+    local socketutil = require("socketutil")
+
+    local function githubGet(url)
+        local chunks = {}
+        socketutil:set_timeout()
+        local _body, code = https.request{
+            url = url,
+            headers = {
+                ["Accept"] = "application/vnd.github+json",
+                ["User-Agent"] = "Fetcher-KOReader",
+            },
+            sink = ltn12.sink.table(chunks),
+        }
+        socketutil:reset_timeout()
+        if code ~= 200 then return nil end
+        local ok, data = pcall(json.decode, table.concat(chunks))
+        return ok and data or nil
+    end
+
+    local release = githubGet("https://api.github.com/repos/" .. SELF_REPO .. "/releases/latest")
+    if not release or not release.tag_name then
+        return false, _("Fetcher: update check failed")
+    end
+
+    -- First run after installing this feature: adopt the latest tag without
+    -- downloading, since we have no reliable installed-version marker yet.
+    local installed_tag = self:getSetting("self_installed_tag")
+    if not installed_tag then
+        self:saveSetting("self_installed_tag", release.tag_name)
+        return true, _("Fetcher: up to date ✓"), false
+    end
+
+    if release.tag_name == installed_tag then
+        return true, _("Fetcher: up to date ✓"), false
+    end
+
+    local dir = self:getSelfDir()
+    local downloaded = {}
+    for _, filename in ipairs(SELF_FILES) do
+        local url = "https://raw.githubusercontent.com/" .. SELF_REPO .. "/" .. release.tag_name .. "/" .. filename
+        local dest = dir .. filename .. ".new"
+
+        socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
+        local dl_code = socket.skip(1, https.request{
+            url = url,
+            headers = {
+                ["User-Agent"] = "Fetcher-KOReader",
+                ["Accept-Encoding"] = "identity",
+            },
+            sink = ltn12.sink.file(io.open(dest, "w")),
+        })
+        socketutil:reset_timeout()
+
+        if dl_code == 200 then
+            table.insert(downloaded, filename)
+        else
+            os.remove(dest)
+        end
+    end
+
+    if #downloaded ~= #SELF_FILES then
+        for _, filename in ipairs(downloaded) do
+            os.remove(dir .. filename .. ".new")
+        end
+        return false, T(_("Fetcher: update to %1 failed"), release.tag_name)
+    end
+
+    for _, filename in ipairs(SELF_FILES) do
+        os.rename(dir .. filename .. ".new", dir .. filename)
+    end
+
+    self:saveSetting("self_installed_tag", release.tag_name)
+    return true, T(_("Fetcher: updated to %1 ✓"), release.tag_name), true
+end
+
 -- Status dialog helper ------------------------------------------------------
 
-function ReaderSync:showStatus(title, subtitle)
+function Fetcher:showStatus(title, subtitle)
     if self._status_dialog then
         UIManager:close(self._status_dialog)
     end
@@ -488,7 +581,7 @@ function ReaderSync:showStatus(title, subtitle)
     UIManager:forceRePaint()
 end
 
-function ReaderSync:closeStatus()
+function Fetcher:closeStatus()
     if self._status_dialog then
         UIManager:close(self._status_dialog)
         self._status_dialog = nil
@@ -497,14 +590,28 @@ end
 
 -- Main sync -----------------------------------------------------------------
 
-function ReaderSync:runSync()
+function Fetcher:runSync()
     NetworkMgr:runWhenOnline(function()
+        local enable_self_update = self:getSetting("enable_self_update", true)
         local enable_update  = self:getSetting("enable_koreader_update", true)
         local enable_opds    = self:getSetting("enable_opds_sync", true)
         local T = require("ffi/util").template
         local lines = {}
+        local needs_restart = false
 
-        -- Step 1: KOReader update
+        -- Step 1: Self-update
+        if enable_self_update then
+            self:showStatus(_("Fetcher"), _("Checking for updates…"))
+            local pcall_ok, _ok, msg, restart = pcall(function() return self:selfUpdate() end)
+            if not pcall_ok then
+                table.insert(lines, "Fetcher: error — " .. tostring(_ok))
+            else
+                table.insert(lines, msg or _("Fetcher: up to date ✓"))
+                needs_restart = needs_restart or (restart or false)
+            end
+        end
+
+        -- Step 2: KOReader update
         local ota_version, ota_package
         if enable_update then
             self:showStatus(_("KOReader Update"), _("Checking for updates…"))
@@ -523,22 +630,21 @@ function ReaderSync:runSync()
             end
         end
 
-        -- Step 2: OPDS books
+        -- Step 3: OPDS books
         if enable_opds then
             self:showStatus(_("Books"), _("Checking for new books…"))
             local ok, msg = self:syncOPDS()
             table.insert(lines, msg or _("Books: up to date ✓"))
         end
 
-        -- Step 3: Patches
-        local patches_need_restart = false
+        -- Step 4: Patches
         self:showStatus(_("Patches"), _("Checking for updates…"))
-        local pcall_ok, _sync_ok, msg, needs_restart = pcall(function() return self:syncPatches() end)
+        local pcall_ok, _sync_ok, msg, patches_restart = pcall(function() return self:syncPatches() end)
         if not pcall_ok then
             table.insert(lines, "Patches: error — " .. tostring(_sync_ok))
         else
             table.insert(lines, msg or _("Patches: up to date ✓"))
-            patches_need_restart = needs_restart or false
+            needs_restart = needs_restart or (patches_restart or false)
         end
 
         -- Final summary
@@ -553,10 +659,10 @@ function ReaderSync:runSync()
         end
 
         local summary_text = table.concat(lines, "\n")
-        if patches_need_restart then
+        if needs_restart then
             local ConfirmBox = require("ui/widget/confirmbox")
             UIManager:show(ConfirmBox:new{
-                text = summary_text .. "\n" .. _("Restart KOReader to apply new patches?"),
+                text = summary_text .. "\n" .. _("Restart KOReader to apply updates?"),
                 ok_text = _("Restart"),
                 cancel_text = _("Later"),
                 ok_callback = function()
@@ -573,27 +679,27 @@ end
 
 -- Dispatcher / menu ---------------------------------------------------------
 
-function ReaderSync:onDispatcherRegisterActions()
-    Dispatcher:registerAction("readersync_run", {
+function Fetcher:onDispatcherRegisterActions()
+    Dispatcher:registerAction("fetcher_run", {
         category = "none",
-        event = "ReaderSyncRun",
-        title = _("ReaderSync: Sync now"),
+        event = "FetcherRun",
+        title = _("Fetcher: Sync now"),
         general = true,
     })
 end
 
-function ReaderSync:init()
+function Fetcher:init()
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
 end
 
-function ReaderSync:onReaderSyncRun()
+function Fetcher:onFetcherRun()
     self:runSync()
 end
 
-function ReaderSync:addToMainMenu(menu_items)
-    menu_items.readersync = {
-        text = _("ReaderSync"),
+function Fetcher:addToMainMenu(menu_items)
+    menu_items.fetcher = {
+        text = _("Fetcher"),
         sorting_hint = "tools",
         sub_item_table = {
             {
@@ -603,6 +709,16 @@ function ReaderSync:addToMainMenu(menu_items)
             {
                 text = _("Settings"),
                 sub_item_table = {
+                    {
+                        text = _("Enable self-update"),
+                        checked_func = function()
+                            return self:getSetting("enable_self_update", true)
+                        end,
+                        callback = function()
+                            local v = self:getSetting("enable_self_update", true)
+                            self:saveSetting("enable_self_update", not v)
+                        end,
+                    },
                     {
                         text = _("KOReader update channel"),
                         sub_item_table = OTAManager:genChannelList(),
@@ -661,10 +777,10 @@ function ReaderSync:addToMainMenu(menu_items)
     }
 end
 
-function ReaderSync:onFlushSettings()
+function Fetcher:onFlushSettings()
     if self.settings then
         self.settings:flush()
     end
 end
 
-return ReaderSync
+return Fetcher

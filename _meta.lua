@@ -1,6 +1,6 @@
 return {
-    name = "readersync",
-    version = "0.1.0",
-    fullname = "ReaderSync",
-    description = "One-tap sync: update KOReader, fetch books, and refresh plugins.",
+    name = "fetcher",
+    version = "0.3.0",
+    fullname = "Fetcher",
+    description = "One-tap sync: update KOReader, fetch books, refresh plugins, and self-update.",
 }
