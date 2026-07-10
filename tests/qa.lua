@@ -56,6 +56,8 @@ local FIXTURES = {}         -- github api url -> release table
 local PENDING_JSON = nil     -- next rapidjson.decode result
 local ARCHIVE_ENTRIES = {}   -- zip path -> list of { path, mode }
 local extract_calls = {}     -- record of extractToPath dest paths
+local STATUS_LOG = {}        -- record of every ProgressbarDialog title/subtitle
+local BEFORE_WIFI_CB = nil   -- last callback passed to NetworkMgr:beforeWifiAction
 
 local function preload(name, mod) package.loaded[name] = mod end
 
@@ -164,10 +166,17 @@ preload("ui/uimanager", {
 local function widgetstub() return setmetatable({}, { __index = function() return function() end end }) end
 preload("ui/widget/infomessage", setmetatable({}, { __index = function() return function() return widgetstub() end end, __call = function() return widgetstub() end }))
 preload("ui/widget/confirmbox", { new = function() return widgetstub() end })
-preload("ui/widget/progressbardialog", { new = function() return {
-    show = function() end, close = function() end, reportProgress = function() end,
-} end })
-preload("ui/network/manager", { runWhenOnline = function(_, fn) fn() end })
+preload("ui/widget/progressbardialog", { new = function(_, o)
+    STATUS_LOG[#STATUS_LOG + 1] = { title = o and o.title, subtitle = o and o.subtitle }
+    return { show = function() end, close = function() end, reportProgress = function() end }
+end })
+local NetworkMgr = {
+    _connected = true,
+    isConnected = function(self) return self._connected end,
+    runWhenOnline = function(_, fn) fn() end,
+    beforeWifiAction = function(_, cb) BEFORE_WIFI_CB = cb end,
+}
+preload("ui/network/manager", NetworkMgr)
 preload("ui/otamanager", {
     getOTAType = function() return "none" end,
     checkUpdate = function() return 0 end,
@@ -313,8 +322,14 @@ do
         { path = "zilch.koplugin/", mode = "directory" },
     } }
     extract_calls = {}
+    STATUS_LOG = {}
 
     local needs_restart, plugin_line, patch_line = f:syncSources()
+    local flipped = false
+    for _, s in ipairs(STATUS_LOG) do
+        if s.title == "Plugins" or s.title == "Patches" then flipped = true end
+    end
+    ok("status heading does not flip to bare Plugins/Patches", not flipped)
     ok("plugin installed: main.lua extracted, prefix stripped", exists(zilch_dir .. "main.lua"))
     ok("plugin installed: _meta.lua extracted", exists(zilch_dir .. "_meta.lua"))
     ok("no double-nested dir", not exists(zilch_dir .. "zilch.koplugin"))
@@ -376,6 +391,29 @@ do
     ok("empty catalog menu returns a placeholder", f:genCatalogMenuItems()[1] ~= nil)
 end
 
+print("\n== wifi gate ==")
+do
+    rmrf(SETTINGS); mkdirp(SETTINGS)
+    local f = newInstance()
+    f:saveSetting("enable_koreader_update", false)
+    f:saveSetting("enable_opds_sync", false)
+    f.getSources = function() return {} end
+
+    -- Offline: sync body must NOT run; connect flow invoked with a retry cb.
+    NetworkMgr._connected = false
+    BEFORE_WIFI_CB = nil
+    ui_shown = {}
+    f:runSync()
+    ok("offline: sync body does not run", #ui_shown == 0)
+    ok("offline: connect flow invoked with retry callback", type(BEFORE_WIFI_CB) == "function")
+
+    -- Wi-Fi comes up, retry callback fires -> body runs.
+    NetworkMgr._connected = true
+    ui_shown = {}
+    BEFORE_WIFI_CB()
+    ok("after connect: sync body runs", #ui_shown >= 1)
+end
+
 print("\n== runSync smoke (update+opds disabled) ==")
 do
     rmrf(SETTINGS); mkdirp(SETTINGS)
@@ -383,6 +421,7 @@ do
     f:saveSetting("enable_koreader_update", false)
     f:saveSetting("enable_opds_sync", false)
     f.getSources = function() return {} end
+    NetworkMgr._connected = true
     ui_shown = {}
     local good, err = pcall(function() f:runSync() end)
     ok("runSync completes without error", good, err)

@@ -598,7 +598,10 @@ function Fetcher:syncSources()
         if repo and not disabled_set[repo] then
             local repo_short = repo:match("[^/]+$") or repo
             local is_plugin = source.type == "plugin"
-            self:showStatus(is_plugin and _("Plugins") or _("Patches"), T(_("Checking %1…"), repo_short))
+            -- One stable heading for the whole step; only the subtitle (the
+            -- repo being checked) changes, so the title doesn't flicker
+            -- between "Plugins" and "Patches" as sources are processed.
+            self:showStatus(_("Plugins & patches"), T(_("Checking %1…"), repo_short))
 
             local release = githubGet("https://api.github.com/repos/" .. repo .. "/releases/latest")
             if not release or not release.tag_name then
@@ -816,6 +819,16 @@ end
 -- Main sync -----------------------------------------------------------------
 
 function Fetcher:runSync()
+    -- Make sure Wi-Fi is actually up before doing any network work.
+    -- isConnected() (the Wi-Fi interface being associated with an IP) is the
+    -- reliable signal that Wi-Fi is on; isOnline() alone is a DNS check that
+    -- can occasionally pass on stale state. If we're not connected, run
+    -- KOReader's connect flow (turn Wi-Fi on / prompt, per the user's
+    -- settings) and re-run the sync once it's up, rather than running offline.
+    if not NetworkMgr:isConnected() then
+        NetworkMgr:beforeWifiAction(function() self:runSync() end)
+        return
+    end
     NetworkMgr:runWhenOnline(function()
         local enable_update  = self:getSetting("enable_koreader_update", true)
         local enable_opds    = self:getSetting("enable_opds_sync", true)
