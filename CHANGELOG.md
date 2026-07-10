@@ -2,6 +2,18 @@
 
 All notable changes to Fetcher are documented here.
 
+## v0.6.1
+
+- **Atomic plugin installs.** Plugins now extract into a staging folder that is
+  swapped into place only after a *complete* extraction. A truncated download,
+  a corrupt archive, or a mid-extraction error can no longer leave a
+  half-installed (broken) plugin — a failed update leaves the previous version
+  untouched. As a bonus, a successful update replaces the whole folder, so
+  files removed upstream no longer linger.
+- **Per-source isolation.** An unexpected error while processing one source
+  (bad archive, disk full, …) now fails just that source instead of aborting
+  the rest of the sync.
+
 ## v0.6.0
 
 - **Curated plugin catalog:** the built-in plugin list grew from 3 to 12 popular

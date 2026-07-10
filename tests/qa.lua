@@ -59,6 +59,12 @@ local extract_calls = {}     -- record of extractToPath dest paths
 local STATUS_LOG = {}        -- record of every ProgressbarDialog title/subtitle
 local BEFORE_WIFI_CB = nil   -- last callback passed to NetworkMgr:beforeWifiAction
 local CODELOAD_HIT = false   -- set when a codeload.github.com URL is downloaded
+-- Failure-injection knobs for edge-case tests (reset per test):
+local ARCHIVE_OPEN_FAIL = false  -- Reader:open returns false (corrupt zip)
+local EXTRACT_FAIL_AT = nil      -- extractToPath returns false on the Nth call
+local EXTRACT_ATTEMPTS = 0       -- running count of extractToPath calls
+local DOWNLOAD_FAIL = false      -- file downloads return HTTP 500
+local THROW_ON_REPO = nil        -- error() when this repo's API URL is fetched
 
 local function preload(name, mod) package.loaded[name] = mod end
 
@@ -96,10 +102,25 @@ function LuaSettings:flush() writefile(self._path, "return " .. ser(self._data, 
 function LuaSettings:close() end
 preload("luasettings", LuaSettings)
 
--- lfs: real filesystem via shell.
+-- lfs: real filesystem via shell, accurate enough for removeTree/swapIntoPlace.
+local function isdir(p) local r = os.execute('test -d "' .. p .. '"'); return r == true or r == 0 end
+local function isfile(p) local r = os.execute('test -f "' .. p .. '"'); return r == true or r == 0 end
 preload("libs/libkoreader-lfs", {
-    attributes = function(path) if exists(path) then return { mode = "file" } end return nil end,
+    attributes = function(path, req)
+        local mode = isdir(path) and "directory" or (isfile(path) and "file" or nil)
+        if req == "mode" then return mode end
+        if mode == nil then return nil end
+        return { mode = mode }
+    end,
     mkdir = function(path) mkdirp(path) return true end,
+    rmdir = function(path) return os.execute('rmdir "' .. path .. '"') and true or nil end,
+    dir = function(path)
+        local entries = { ".", ".." }
+        local p = io.popen('ls -1A "' .. path .. '" 2>/dev/null')
+        if p then for line in p:lines() do entries[#entries + 1] = line end p:close() end
+        local i = 0
+        return function() i = i + 1; return entries[i] end
+    end,
 })
 preload("util", { makePath = function(path) mkdirp(path) return true end })
 
@@ -128,11 +149,13 @@ preload("socket.http", { request = function() return 1, 200, {} end })
 preload("ssl.https", { request = function(t)
     if t.method == "HEAD" then return 1, 200, {} end
     if t.url:find("api.github.com") then
+        if THROW_ON_REPO and t.url:find(THROW_ON_REPO, 1, true) then error("injected API error") end
         PENDING_JSON = FIXTURES[t.url]
         if t.sink then t.sink("json"); t.sink(nil) end
         return 1, (PENDING_JSON and 200 or 404)
     end
     if t.url:find("codeload.github.com") then CODELOAD_HIT = true end
+    if DOWNLOAD_FAIL then return 1, 500 end
     -- file download: write dummy bytes so the temp file is created
     if t.sink then t.sink("BYTES"); t.sink(nil) end
     return 1, 200
@@ -144,12 +167,17 @@ preload("rapidjson", { decode = function(_) return PENDING_JSON end })
 local Archiver = { Reader = {} }
 Archiver.Reader.__index = Archiver.Reader
 function Archiver.Reader:new() return setmetatable({}, Archiver.Reader) end
-function Archiver.Reader:open(path) self._path = path; self._entries = ARCHIVE_ENTRIES[path] or {}; return true end
+function Archiver.Reader:open(path)
+    if ARCHIVE_OPEN_FAIL then return false end
+    self._path = path; self._entries = ARCHIVE_ENTRIES[path] or {}; return true
+end
 function Archiver.Reader:iterate()
     local i = 0
     return function() i = i + 1; return self._entries[i] end
 end
 function Archiver.Reader:extractToPath(_archive_path, dest_path)
+    EXTRACT_ATTEMPTS = EXTRACT_ATTEMPTS + 1
+    if EXTRACT_FAIL_AT and EXTRACT_ATTEMPTS == EXTRACT_FAIL_AT then return false end
     extract_calls[#extract_calls + 1] = dest_path
     writefile(dest_path, "extracted")
     return true
@@ -429,6 +457,129 @@ do
     ok("zip-slip archive reported as failed", pline == "Plugins: 0 updated, failed: evil.koplugin", pline)
     ok("no file escaped the destination", not exists(PLUGINS .. "/escape.lua") and not exists(WORK .. "/escape.lua"))
     ok("installed tag NOT recorded on failure", f:getSetting("patch_installed_tags", {})[EVIL] == nil)
+end
+
+local function resetInjection()
+    ARCHIVE_OPEN_FAIL = false; EXTRACT_FAIL_AT = nil; EXTRACT_ATTEMPTS = 0
+    DOWNLOAD_FAIL = false; THROW_ON_REPO = nil
+end
+
+print("\n== edge: partial extraction never corrupts a fresh install ==")
+do
+    rmrf(SETTINGS); mkdirp(SETTINGS); rmrf(PLUGINS); mkdirp(PLUGINS); rmrf(DATA); mkdirp(DATA)
+    resetInjection()
+    local f = newInstance()
+    local REPO, dir = "test/broken.koplugin", PLUGINS .. "/broken.koplugin/"
+    f.getSources = function() return { { repo = REPO, type = "plugin", dir = dir } } end
+    FIXTURES = { ["https://api.github.com/repos/" .. REPO .. "/releases/latest"] =
+        { tag_name = "v1", assets = { { name = "broken.koplugin.zip", browser_download_url = "https://dl/b.zip", size = 1 } } } }
+    ARCHIVE_ENTRIES = { [DATA .. "/fetcher_tmp/broken.koplugin.zip"] = {
+        { path = "broken.koplugin/main.lua", mode = "file" },
+        { path = "broken.koplugin/lib/x.lua", mode = "file" },
+        { path = "broken.koplugin/_meta.lua", mode = "file" },
+    } }
+    EXTRACT_FAIL_AT = 2 -- fail extracting the 2nd file
+    local _nr, pline = f:syncSources()
+    ok("destination NOT created on failed extraction", not exists(dir))
+    ok("no files leaked to destination", not exists(dir .. "main.lua"))
+    ok("staging dir cleaned up", not exists(PLUGINS .. "/broken.koplugin.fetcher-new"))
+    ok("reported failed", pline == "Plugins: 0 updated, failed: broken.koplugin", pline)
+    ok("installed tag NOT recorded", f:getSetting("patch_installed_tags", {})[REPO] == nil)
+end
+
+print("\n== edge: failed update keeps the old install intact ==")
+do
+    rmrf(SETTINGS); mkdirp(SETTINGS); rmrf(PLUGINS); mkdirp(PLUGINS); rmrf(DATA); mkdirp(DATA)
+    resetInjection()
+    local f = newInstance()
+    local REPO, dir = "test/existing.koplugin", PLUGINS .. "/existing.koplugin/"
+    mkdirp(dir); writefile(dir .. "main.lua", "OLD"); writefile(dir .. "_meta.lua", "OLDMETA")
+    f:saveSetting("patch_installed_tags", { [REPO] = "v0" })
+    f.getSources = function() return { { repo = REPO, type = "plugin", dir = dir } } end
+    FIXTURES = { ["https://api.github.com/repos/" .. REPO .. "/releases/latest"] =
+        { tag_name = "v1", assets = { { name = "existing.koplugin.zip", browser_download_url = "https://dl/e.zip", size = 1 } } } }
+    ARCHIVE_ENTRIES = { [DATA .. "/fetcher_tmp/existing.koplugin.zip"] = {
+        { path = "existing.koplugin/main.lua", mode = "file" },
+        { path = "existing.koplugin/_meta.lua", mode = "file" },
+    } }
+    EXTRACT_FAIL_AT = 2
+    local _nr, pline = f:syncSources()
+    ok("old main.lua unchanged", readfile(dir .. "main.lua") == "OLD")
+    ok("old _meta.lua unchanged", readfile(dir .. "_meta.lua") == "OLDMETA")
+    ok("no staging/backup dirs left", not exists(PLUGINS .. "/existing.koplugin.fetcher-new")
+        and not exists(PLUGINS .. "/existing.koplugin.fetcher-old"))
+    ok("installed tag stays v0", f:getSetting("patch_installed_tags", {})[REPO] == "v0")
+    ok("reported failed", pline == "Plugins: 0 updated, failed: existing.koplugin", pline)
+end
+
+print("\n== edge: successful update replaces atomically (stale files removed) ==")
+do
+    rmrf(SETTINGS); mkdirp(SETTINGS); rmrf(PLUGINS); mkdirp(PLUGINS); rmrf(DATA); mkdirp(DATA)
+    resetInjection()
+    local f = newInstance()
+    local REPO, dir = "test/upd.koplugin", PLUGINS .. "/upd.koplugin/"
+    mkdirp(dir); writefile(dir .. "main.lua", "OLD"); writefile(dir .. "removed_in_v1.lua", "STALE")
+    f:saveSetting("patch_installed_tags", { [REPO] = "v0" })
+    f.getSources = function() return { { repo = REPO, type = "plugin", dir = dir } } end
+    FIXTURES = { ["https://api.github.com/repos/" .. REPO .. "/releases/latest"] =
+        { tag_name = "v1", assets = { { name = "upd.koplugin.zip", browser_download_url = "https://dl/u.zip", size = 1 } } } }
+    ARCHIVE_ENTRIES = { [DATA .. "/fetcher_tmp/upd.koplugin.zip"] = { { path = "upd.koplugin/main.lua", mode = "file" } } }
+    local _nr, pline = f:syncSources()
+    ok("main.lua replaced with new content", readfile(dir .. "main.lua") == "extracted")
+    ok("stale file removed by whole-dir swap", not exists(dir .. "removed_in_v1.lua"))
+    ok("no backup/staging left", not exists(PLUGINS .. "/upd.koplugin.fetcher-old")
+        and not exists(PLUGINS .. "/upd.koplugin.fetcher-new"))
+    ok("tag bumped to v1", f:getSetting("patch_installed_tags", {})[REPO] == "v1")
+    ok("reported 1 updated", pline == "Plugins: 1 updated ✓", pline)
+end
+
+print("\n== edge: corrupt zip and download failure ==")
+do
+    rmrf(SETTINGS); mkdirp(SETTINGS); rmrf(PLUGINS); mkdirp(PLUGINS); rmrf(DATA); mkdirp(DATA)
+    resetInjection()
+    local f = newInstance()
+    local REPO, dir = "test/corrupt.koplugin", PLUGINS .. "/corrupt.koplugin/"
+    f.getSources = function() return { { repo = REPO, type = "plugin", dir = dir } } end
+    FIXTURES = { ["https://api.github.com/repos/" .. REPO .. "/releases/latest"] =
+        { tag_name = "v1", assets = { { name = "corrupt.koplugin.zip", browser_download_url = "https://dl/c.zip", size = 1 } } } }
+    ARCHIVE_ENTRIES = { [DATA .. "/fetcher_tmp/corrupt.koplugin.zip"] = { { path = "corrupt.koplugin/main.lua", mode = "file" } } }
+
+    ARCHIVE_OPEN_FAIL = true
+    local _n1, p1 = f:syncSources()
+    ok("corrupt zip: failed, nothing installed", not exists(dir) and p1 == "Plugins: 0 updated, failed: corrupt.koplugin", p1)
+    ok("corrupt zip: temp zip cleaned up", not exists(DATA .. "/fetcher_tmp/corrupt.koplugin.zip"))
+    ok("corrupt zip: tag not recorded", f:getSetting("patch_installed_tags", {})[REPO] == nil)
+
+    ARCHIVE_OPEN_FAIL = false; DOWNLOAD_FAIL = true
+    local _n2, p2 = f:syncSources()
+    ok("download 500: failed, nothing installed", not exists(dir) and p2 == "Plugins: 0 updated, failed: corrupt.koplugin", p2)
+    ok("download 500: temp zip cleaned up", not exists(DATA .. "/fetcher_tmp/corrupt.koplugin.zip"))
+    DOWNLOAD_FAIL = false
+end
+
+print("\n== edge: one failing source does not abort the others ==")
+do
+    rmrf(SETTINGS); mkdirp(SETTINGS); rmrf(PLUGINS); mkdirp(PLUGINS); rmrf(DATA); mkdirp(DATA)
+    resetInjection()
+    local f = newInstance()
+    local BAD, GOOD = "throwy/bad.koplugin", "okay/good.koplugin"
+    local good_dir = PLUGINS .. "/good.koplugin/"
+    f.getSources = function() return {
+        { repo = BAD, type = "plugin", dir = PLUGINS .. "/bad.koplugin/" },
+        { repo = GOOD, type = "plugin", dir = good_dir },
+    } end
+    FIXTURES = {
+        ["https://api.github.com/repos/" .. BAD .. "/releases/latest"] = { tag_name = "v1", assets = {} },
+        ["https://api.github.com/repos/" .. GOOD .. "/releases/latest"] = { tag_name = "v1",
+            assets = { { name = "good.koplugin.zip", browser_download_url = "https://dl/g.zip", size = 1 } } },
+    }
+    ARCHIVE_ENTRIES = { [DATA .. "/fetcher_tmp/good.koplugin.zip"] = { { path = "good.koplugin/main.lua", mode = "file" } } }
+    THROW_ON_REPO = BAD -- BAD's API fetch throws -> should be caught per-source
+    local _nr, pline = f:syncSources()
+    ok("throwing source reported as failed", pline:find("bad.koplugin", 1, true) ~= nil, pline)
+    ok("later good source still installed", exists(good_dir .. "main.lua"))
+    ok("good update still counted", pline:find("1 updated", 1, true) ~= nil, pline)
+    THROW_ON_REPO = nil
 end
 
 print("\n== other menu generators ==")

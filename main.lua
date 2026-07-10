@@ -611,6 +611,41 @@ function Fetcher:syncSources()
         return true
     end
 
+    -- Recursively delete a file or directory tree (KOReader's util.removePath
+    -- only prunes empty dirs). Missing paths are a no-op.
+    local function removeTree(path)
+        local mode = lfs.attributes(path, "mode")
+        if mode == nil then return end
+        if mode == "directory" then
+            for entry in lfs.dir(path) do
+                if entry ~= "." and entry ~= ".." then
+                    removeTree(path .. "/" .. entry)
+                end
+            end
+            lfs.rmdir(path)
+        else
+            os.remove(path)
+        end
+    end
+
+    -- Move a freshly-extracted staging dir onto the real plugin dir using
+    -- atomic renames, so the live install is never left half-written. Returns
+    -- true on success; on failure the previous install is restored untouched.
+    local function swapIntoPlace(stage, dest)
+        if lfs.attributes(dest, "mode") == nil then
+            return os.rename(stage, dest) and true or false -- fresh install
+        end
+        local old = dest .. ".fetcher-old"
+        removeTree(old)
+        if not os.rename(dest, old) then return false end
+        if not os.rename(stage, dest) then
+            os.rename(old, dest) -- put the previous install back
+            return false
+        end
+        removeTree(old)
+        return true
+    end
+
     local installed_tags = self:getSetting("patch_installed_tags", {})
     local disabled_patches = self:getSetting("disabled_patches", {})
     local disabled_patch_set = {}
@@ -626,6 +661,10 @@ function Fetcher:syncSources()
         if repo and self:isSourceManaged(source) then
             local repo_short = repo:match("[^/]+$") or repo
             local is_plugin = source.type == "plugin"
+            -- Isolate each source: an unexpected error (truncated write, bad
+            -- archive, disk full…) fails just this source rather than aborting
+            -- the whole sync. Expected failures still push onto *_failed below.
+            local ok_iter = pcall(function()
             -- One stable heading for the whole step; only the subtitle (the
             -- repo being checked) changes, so the title doesn't flicker
             -- between "Plugins" and "Patches" as sources are processed.
@@ -719,16 +758,28 @@ function Fetcher:syncSources()
                         os.remove(tmp_zip)
                         table.insert(plugin_failed, repo_short)
                     else
-                        util.makePath(source.dir) -- fresh install: create if missing
                         local reader = Archiver.Reader:new()
                         if not reader:open(tmp_zip) then
                             os.remove(tmp_zip)
                             table.insert(plugin_failed, repo_short)
                         else
-                            local extract_ok = extractZip(reader, source.dir)
+                            -- Extract into a staging dir beside the target so a
+                            -- truncated download or a mid-extraction failure can
+                            -- never leave a half-installed (broken) plugin; only
+                            -- a complete extraction is swapped into place. The
+                            -- staging/backup names don't end in .koplugin, so
+                            -- KOReader ignores any leftover from an aborted run.
+                            local dest = source.dir:gsub("/+$", "")
+                            local stage = dest .. ".fetcher-new"
+                            removeTree(stage)
+                            local extract_ok = extractZip(reader, stage .. "/")
                             reader:close()
                             os.remove(tmp_zip)
-                            if extract_ok then
+
+                            local installed_ok = extract_ok and swapIntoPlace(stage, dest)
+                            removeTree(stage) -- no-op once the swap moved it
+
+                            if installed_ok then
                                 plugin_updated = plugin_updated + 1
                                 installed_tags[repo] = release.tag_name
                                 self:saveSetting("patch_installed_tags", installed_tags)
@@ -797,6 +848,10 @@ function Fetcher:syncSources()
                     installed_tags[repo] = release.tag_name
                     self:saveSetting("patch_installed_tags", installed_tags)
                 end
+            end
+            end) -- end isolated per-source processing
+            if not ok_iter then
+                table.insert(is_plugin and plugin_failed or patch_failed, repo_short)
             end
         end
     end
