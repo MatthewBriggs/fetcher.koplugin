@@ -58,6 +58,7 @@ local ARCHIVE_ENTRIES = {}   -- zip path -> list of { path, mode }
 local extract_calls = {}     -- record of extractToPath dest paths
 local STATUS_LOG = {}        -- record of every ProgressbarDialog title/subtitle
 local BEFORE_WIFI_CB = nil   -- last callback passed to NetworkMgr:beforeWifiAction
+local CODELOAD_HIT = false   -- set when a codeload.github.com URL is downloaded
 
 local function preload(name, mod) package.loaded[name] = mod end
 
@@ -131,6 +132,7 @@ preload("ssl.https", { request = function(t)
         if t.sink then t.sink("json"); t.sink(nil) end
         return 1, (PENDING_JSON and 200 or 404)
     end
+    if t.url:find("codeload.github.com") then CODELOAD_HIT = true end
     -- file download: write dummy bytes so the temp file is created
     if t.sink then t.sink("BYTES"); t.sink(nil) end
     return 1, 200
@@ -233,34 +235,45 @@ do
     ok("migration does not overwrite existing fetcher.lua", dofile(SETTINGS .. "/fetcher.lua").sentinel == true)
 end
 
-print("\n== default-OFF seeding ==")
+print("\n== managed model (manage-if-installed) ==")
 do
-    -- Clean slate: no plugins installed on device.
     rmrf(SETTINGS); mkdirp(SETTINGS); rmrf(PLUGINS); mkdirp(PLUGINS)
     local f = newInstance()
-    f:seedDefaultDisabledPlugins()
-    local disabled = f:getSetting("disabled_patch_repos", {})
-    local set = {}; for _, r in ipairs(disabled) do set[r] = true end
-    ok("zen_ui seeded disabled", set["AnthonyGress/zen_ui.koplugin"] == true)
-    ok("bookends seeded disabled", set["AndyHazz/bookends.koplugin"] == true)
-    ok("appearance seeded disabled", set["Euphoriyy/appearance.koplugin"] == true)
-    ok("self repo NOT disabled", set["MatthewBriggs/fetcher.koplugin"] ~= true)
-    ok("seeded flag set", f:getSetting("builtin_defaults_seeded", false) == true)
+    local ZEN = "AnthonyGress/zen_ui.koplugin"
+    local BOOK = "AndyHazz/bookends.koplugin"
+    local function src(repo)
+        for _, s in ipairs(f:getSources()) do if s.repo == repo then return s end end
+    end
 
-    -- Idempotent: re-enabling then re-seeding must not re-disable.
-    f:saveSetting("disabled_patch_repos", {})
-    f:seedDefaultDisabledPlugins()
-    ok("re-seed is a no-op after flag set", #f:getSetting("disabled_patch_repos", {}) == 0)
+    -- Curated plugin, not installed -> NOT managed by default (won't install).
+    ok("curated + not installed -> not managed", f:isSourceManaged(src(ZEN)) == false)
+    ok("self -> managed by default", f:isSourceManaged(src("MatthewBriggs/fetcher.koplugin")) == true)
 
-    -- Already-installed plugin is left enabled.
-    rmrf(SETTINGS); mkdirp(SETTINGS)
+    -- Curated plugin, already installed -> managed by default (auto-update).
     mkdirp(PLUGINS .. "/zen_ui.koplugin")
-    f = newInstance(); f:seedDefaultDisabledPlugins()
-    disabled = f:getSetting("disabled_patch_repos", {})
-    set = {}; for _, r in ipairs(disabled) do set[r] = true end
-    ok("installed plugin stays enabled", set["AnthonyGress/zen_ui.koplugin"] ~= true)
-    ok("uninstalled plugin still disabled", set["AndyHazz/bookends.koplugin"] == true)
+    ok("curated + installed -> managed", f:isSourceManaged(src(ZEN)) == true)
+
+    -- Explicit choices override the default either way.
+    f:setSourceManaged(BOOK, true)
+    ok("opt-in: not-installed plugin becomes managed", f:isSourceManaged(src(BOOK)) == true)
+    f:setSourceManaged(ZEN, false)
+    ok("opt-out: installed plugin becomes unmanaged", f:isSourceManaged(src(ZEN)) == false)
     rmrf(PLUGINS .. "/zen_ui.koplugin")
+end
+
+print("\n== migrate disabled_patch_repos -> source_enabled ==")
+do
+    rmrf(SETTINGS); mkdirp(SETTINGS)
+    local f = newInstance()
+    f:saveSetting("disabled_patch_repos", { "some/repo", "other/thing.koplugin" })
+    f:migrateDisabledRepos()
+    local choices = f:getSetting("source_enabled", {})
+    ok("old disabled repo migrated to false", choices["some/repo"] == false)
+    ok("second disabled repo migrated to false", choices["other/thing.koplugin"] == false)
+    ok("migration flag set", f:getSetting("source_enabled_migrated", false) == true)
+    f:saveSetting("source_enabled", {})
+    f:migrateDisabledRepos()
+    ok("re-migrate is a no-op", next(f:getSetting("source_enabled", {})) == nil)
 end
 
 print("\n== getSources shape ==")
@@ -273,8 +286,14 @@ do
     local byrepo = {}; for _, s in ipairs(sources) do byrepo[s.repo] = s end
     ok("self is a plugin source with files list", byrepo["MatthewBriggs/fetcher.koplugin"]
         and byrepo["MatthewBriggs/fetcher.koplugin"].files ~= nil)
-    ok("built-in zip plugin has dir, no files", byrepo["AnthonyGress/zen_ui.koplugin"]
-        and byrepo["AnthonyGress/zen_ui.koplugin"].dir and byrepo["AnthonyGress/zen_ui.koplugin"].files == nil)
+    ok("curated plugin has dir + curated flag, no files", byrepo["AnthonyGress/zen_ui.koplugin"]
+        and byrepo["AnthonyGress/zen_ui.koplugin"].dir
+        and byrepo["AnthonyGress/zen_ui.koplugin"].curated == true
+        and byrepo["AnthonyGress/zen_ui.koplugin"].files == nil)
+    ok("self is not flagged curated", byrepo["MatthewBriggs/fetcher.koplugin"].curated ~= true)
+    local curated_n = 0
+    for _, s in ipairs(sources) do if s.curated then curated_n = curated_n + 1 end end
+    ok("curated list has 12 plugins", curated_n == 12, curated_n)
     ok("user plugin source got dir backfilled", byrepo["u/thing.koplugin"]
         and byrepo["u/thing.koplugin"].dir == PLUGINS .. "/thing.koplugin/")
     ok("user patch source has no plugin type", byrepo["u/patches"] and byrepo["u/patches"].type ~= "plugin")
@@ -282,16 +301,20 @@ end
 
 print("\n== menu split ==")
 do
+    rmrf(PLUGINS); mkdirp(PLUGINS)
     local f = newInstance()
     local plugin_items = f:genPluginMenuItems()
     local patch_items = f:genSourceMenuItems()
-    local ptext = {}; for _, it in ipairs(plugin_items) do ptext[it.text] = true end
-    local qtext = {}; for _, it in ipairs(patch_items) do qtext[it.text] = true end
-    ok("Plugin sources lists self", ptext["MatthewBriggs/fetcher.koplugin"] == true)
-    ok("Plugin sources lists zip plugins", ptext["AnthonyGress/zen_ui.koplugin"] == true)
-    ok("Plugin sources excludes patch repo", ptext["u/patches"] ~= true)
-    ok("Patch sources lists patch repo", qtext["u/patches"] == true)
-    ok("Patch sources excludes plugins", qtext["MatthewBriggs/fetcher.koplugin"] ~= true)
+    local function has(items, needle)
+        for _, it in ipairs(items) do if it.text and it.text:find(needle, 1, true) then return true end end
+        return false
+    end
+    ok("Plugin sources lists self", has(plugin_items, "MatthewBriggs/fetcher.koplugin"))
+    ok("Plugin sources lists curated plugin", has(plugin_items, "AnthonyGress/zen_ui.koplugin"))
+    ok("Plugin sources shows install status", has(plugin_items, "not installed"))
+    ok("Plugin sources excludes patch repo", not has(plugin_items, "u/patches"))
+    ok("Patch sources lists patch repo", has(patch_items, "u/patches"))
+    ok("Patch sources excludes plugins", not has(patch_items, "MatthewBriggs/fetcher.koplugin"))
 end
 
 print("\n== syncSources end-to-end ==")
@@ -346,6 +369,46 @@ do
     ok("second run: patches up to date", ql2 == "Patches: up to date ✓", ql2)
     ok("second run: no extraction", #extract_calls == 0)
     ok("second run: no restart needed", nr2 == false)
+end
+
+print("\n== plugins/-wrapped zip + zipball fallback ==")
+do
+    rmrf(SETTINGS); mkdirp(SETTINGS); rmrf(PLUGINS); mkdirp(PLUGINS); rmrf(DATA); mkdirp(DATA)
+    local f = newInstance()
+    local WRAP = "test/wrapped.koplugin"    -- release .zip wrapped in plugins/<name>/
+    local FALL = "test/fallback.koplugin"   -- release with NO .zip asset -> zipball
+    local wrap_dir = PLUGINS .. "/wrapped.koplugin/"
+    local fall_dir = PLUGINS .. "/fallback.koplugin/"
+    f.getSources = function()
+        return {
+            { repo = WRAP, type = "plugin", dir = wrap_dir },
+            { repo = FALL, type = "plugin", dir = fall_dir },
+        }
+    end
+    local api = function(r) return "https://api.github.com/repos/" .. r .. "/releases/latest" end
+    FIXTURES = {
+        [api(WRAP)] = { tag_name = "v1", assets = {
+            { name = "wrapped.koplugin.zip", browser_download_url = "https://dl/wrapped.zip", size = 10 } } },
+        [api(FALL)] = { tag_name = "v2", assets = {} }, -- no .zip -> source-zipball fallback
+    }
+    ARCHIVE_ENTRIES = {
+        [DATA .. "/fetcher_tmp/wrapped.koplugin.zip"] = {
+            { path = "plugins/wrapped.koplugin/main.lua", mode = "file" },
+            { path = "plugins/wrapped.koplugin/sub/x.lua", mode = "file" },
+        },
+        [DATA .. "/fetcher_tmp/fallback.koplugin.zip"] = {
+            { path = "test-fallback.koplugin-abc123/main.lua", mode = "file" },
+            { path = "test-fallback.koplugin-abc123/_meta.lua", mode = "file" },
+        },
+    }
+    CODELOAD_HIT = false
+    local _nr, pline = f:syncSources()
+    ok("plugins/-wrapped: main.lua at dest root (2-segment strip)", exists(wrap_dir .. "main.lua"))
+    ok("plugins/-wrapped: nested file preserved", exists(wrap_dir .. "sub/x.lua"))
+    ok("plugins/-wrapped: no double-nesting", not exists(wrap_dir .. "plugins"))
+    ok("zipball fallback: installed from source zip", exists(fall_dir .. "main.lua") and exists(fall_dir .. "_meta.lua"))
+    ok("zipball fallback: used codeload URL", CODELOAD_HIT == true)
+    ok("both plugins reported updated", pline == "Plugins: 2 updated ✓", pline)
 end
 
 print("\n== syncSources zip-slip guard ==")

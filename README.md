@@ -42,7 +42,7 @@ Once installed, Fetcher keeps itself updated.
 | Enable OPDS book sync | Toggle book sync on/off |
 | Select OPDS catalogs | Choose which catalogs to sync |
 | Force re-download all books | Re-download everything on next sync (clears after one run) |
-| Plugin sources… | Enable/disable whole-plugin sources, including Fetcher itself |
+| Plugin sources… | Manage whole-plugin sources (Fetcher, curated list, your own). Installed ones auto-update; tick a "not installed" one to install it |
 | Patch sources… | Enable/disable individual `.lua` patch repos |
 | Individual patches… | Enable/disable individual synced patch files |
 
@@ -57,22 +57,24 @@ and prompts a restart.
 
 ## Built-in plugin updates
 
-Fetcher ships with three other plugins as built-in **plugin sources**:
+Fetcher ships with a curated list of popular KOReader plugins as built-in
+**plugin sources** — ZenUI, Bookends, Appearance, AppStore, zlibrary, Legado,
+OPDS+, KoAssistant, AnnotationSync, Readeck, ReaderMenuRedesign, and
+HighlightSync.
 
-- [ZenUI](https://github.com/AnthonyGress/zen_ui.koplugin)
-- [Bookends](https://github.com/AndyHazz/bookends.koplugin)
-- [Appearance](https://github.com/Euphoriyy/appearance.koplugin)
+**Manage-if-installed:** a curated plugin that's **already on your device** is
+kept updated automatically. One that **isn't installed** shows up in
+**Plugin sources…** with a "not installed" label but is left alone until you
+tick it — Fetcher never installs a plugin you didn't ask for. Fetcher itself
+and anything in your `fetcher_sources.lua` are managed by default.
 
-They are **disabled by default** — Fetcher won't install anything you didn't
-ask for. Tick the ones you want under **Plugin sources…** and they'll be
-installed (fresh if missing) and kept current on each sync. A plugin already
-present on your device stays enabled so it keeps updating.
-
-Each is distributed as a single `.zip` release asset (the standard KOReader
-plugin release format). Fetcher downloads the zip, auto-detects whether its
-contents are wrapped in a root folder or flat, guards against unsafe paths, and
-extracts it into a sibling directory of Fetcher's own (e.g.
-`plugins/zen_ui.koplugin/`), creating it if needed.
+Each is installed from its GitHub release: a prebuilt `.zip` asset if the repo
+ships one, otherwise the release tag's source zip. Fetcher strips the wrapping
+folder (handling `<name>.koplugin/…`, `plugins/<name>.koplugin/…`, and source
+zipballs alike), guards against unsafe paths, and extracts into a sibling of
+Fetcher's own directory (e.g. `plugins/zen_ui.koplugin/`), creating it if
+needed. A plugin whose repo nests its files in an unusual layout may not
+install cleanly — untick it if so.
 
 ## Adding your own sources
 

@@ -11,13 +11,24 @@ local _ = require("gettext")
 local SELF_REPO = "MatthewBriggs/fetcher.koplugin"
 local SELF_FILES = { "main.lua", "_meta.lua" }
 
--- Built-in plugin sources distributed as a single prebuilt release .zip
--- (unlike SELF_FILES, these repos have many files across subdirectories, so
--- the fixed-file-list mechanism doesn't generalize — see syncSources()).
-local ZIP_PLUGIN_REPOS = {
+-- Curated built-in plugin sources: popular KOReader plugins distributed as a
+-- single release .zip (or a release whose source zipball we fall back to).
+-- They are *offered*, not forced: one that is already installed is kept
+-- updated; one that isn't is shown in "Plugin sources…" but only installed if
+-- the user ticks it (see isSourceManaged / syncSources).
+local CURATED_PLUGIN_REPOS = {
     "AnthonyGress/zen_ui.koplugin",
     "AndyHazz/bookends.koplugin",
     "Euphoriyy/appearance.koplugin",
+    "omer-faruq/appstore.koplugin",
+    "ZlibraryKO/zlibrary.koplugin",
+    "pengcw/legado.koplugin",
+    "greywolf1499/opds_plus.koplugin",
+    "zeeyado/koassistant.koplugin",
+    "dani84bs/AnnotationSync.koplugin",
+    "iceyear/readeck.koplugin",
+    "kristianpennacchia/zzz-readermenuredesign.koplugin",
+    "gitalexcampos/highlightsync.koplugin",
 }
 
 local Fetcher = WidgetContainer:extend{
@@ -46,27 +57,49 @@ function Fetcher:saveSetting(key, value)
     self.settings:flush()
 end
 
--- On first run, the built-in ZIP_PLUGIN_REPOS start disabled so a fresh
--- install never installs plugins the user didn't explicitly ask for. They
--- still appear (one tap away) under "Plugin sources…". Fetcher's own repo is
--- deliberately NOT seeded — self-update is on by default. A plugin that is
--- already installed on this device is left enabled, so existing setups keep
--- updating rather than silently going stale.
-function Fetcher:seedDefaultDisabledPlugins()
-    if self:getSetting("builtin_defaults_seeded", false) then return end
+-- A plugin source is "installed" if its destination directory exists.
+function Fetcher:isPluginInstalled(source)
+    if not source.dir then return false end
     local lfs = require("libs/libkoreader-lfs")
-    local parent = self:getPluginsParentDir()
-    local disabled = self:getSetting("disabled_patch_repos", {})
-    local present = {}
-    for _, r in ipairs(disabled) do present[r] = true end
-    for _, repo in ipairs(ZIP_PLUGIN_REPOS) do
-        local dir = parent .. (repo:match("[^/]+$") or repo)
-        if not present[repo] and not lfs.attributes(dir) then
-            table.insert(disabled, repo)
-        end
+    return lfs.attributes((source.dir:gsub("/+$", ""))) ~= nil
+end
+
+-- Whether a source is managed (installed/updated on sync). Explicit user
+-- choices (the source_enabled map) always win; otherwise a sensible default
+-- per source: a curated plugin is managed only if it's *already installed*
+-- (so a fresh install never pulls in plugins the user didn't ask for),
+-- while everything else — Fetcher itself, user-listed sources, patch repos —
+-- is managed by default.
+function Fetcher:isSourceManaged(source)
+    local choices = self:getSetting("source_enabled", {})
+    local v = choices[source.repo]
+    if v ~= nil then return v end
+    if source.curated then
+        return self:isPluginInstalled(source)
     end
-    self:saveSetting("disabled_patch_repos", disabled)
-    self:saveSetting("builtin_defaults_seeded", true)
+    return true
+end
+
+function Fetcher:setSourceManaged(repo, enabled)
+    local choices = self:getSetting("source_enabled", {})
+    choices[repo] = enabled
+    self:saveSetting("source_enabled", choices)
+end
+
+-- One-time migration of the old opt-out list (disabled_patch_repos) to the
+-- explicit-choice map (source_enabled), so prior "don't touch this" choices
+-- carry over.
+function Fetcher:migrateDisabledRepos()
+    if self:getSetting("source_enabled_migrated", false) then return end
+    local disabled = self:getSetting("disabled_patch_repos", nil)
+    if type(disabled) == "table" then
+        local choices = self:getSetting("source_enabled", {})
+        for _, repo in ipairs(disabled) do
+            if choices[repo] == nil then choices[repo] = false end
+        end
+        self:saveSetting("source_enabled", choices)
+    end
+    self:saveSetting("source_enabled_migrated", true)
 end
 
 -- One-time migration for the ReaderSync → Fetcher rename: the old settings
@@ -334,43 +367,30 @@ function Fetcher:genPatchMenuItems()
 end
 
 
--- Build a toggle menu item for a single source repo. Plugins and patches
--- share the same disabled_patch_repos set, but are shown in separate menus.
-function Fetcher:genRepoToggleItem(repo)
+-- Build a toggle menu item for a single source. The tick reflects whether the
+-- source is managed (installed/updated on sync); toggling records an explicit
+-- choice in the source_enabled map. Ticking a not-yet-installed plugin opts in
+-- to installing it on the next sync.
+function Fetcher:genRepoToggleItem(source, text)
+    local repo = source.repo
     return {
-        text = repo,
-        checked_func = function()
-            local disabled = self:getSetting("disabled_patch_repos", {})
-            for _j, r in ipairs(disabled) do
-                if r == repo then return false end
-            end
-            return true
-        end,
+        text = text or repo,
+        checked_func = function() return self:isSourceManaged(source) end,
         callback = function()
-            local disabled = self:getSetting("disabled_patch_repos", {})
-            local found = false
-            for _j, r in ipairs(disabled) do
-                if r == repo then
-                    table.remove(disabled, _j)
-                    found = true
-                    break
-                end
-            end
-            if not found then
-                table.insert(disabled, repo)
-            end
-            self:saveSetting("disabled_patch_repos", disabled)
+            self:setSourceManaged(repo, not self:isSourceManaged(source))
         end,
     }
 end
 
--- Plugin sources: whole plugins updated from a repo (type == "plugin"),
--- including Fetcher itself and the bundled zip plugins.
+-- Plugin sources: whole plugins (type == "plugin") — Fetcher itself, the
+-- curated built-ins, and any user-listed plugin repos. Each shows whether it
+-- is currently installed.
 function Fetcher:genPluginMenuItems()
     local items = {}
     for _i, source in ipairs(self:getSources()) do
         if source.repo and source.type == "plugin" then
-            items[#items + 1] = self:genRepoToggleItem(source.repo)
+            local status = self:isPluginInstalled(source) and _("installed") or _("not installed")
+            items[#items + 1] = self:genRepoToggleItem(source, source.repo .. "  (" .. status .. ")")
         end
     end
     if #items == 0 then
@@ -385,7 +405,7 @@ function Fetcher:genSourceMenuItems()
     local items = {}
     for _i, source in ipairs(self:getSources()) do
         if source.repo and source.type ~= "plugin" then
-            items[#items + 1] = self:genRepoToggleItem(source.repo)
+            items[#items + 1] = self:genRepoToggleItem(source)
         end
     end
     if #items == 0 then
@@ -408,17 +428,18 @@ function Fetcher:getSources()
         end
     end
     -- Built-ins always come first, fixed order: Fetcher itself, then the
-    -- bundled zip-distributed plugins, then user-configured patch sources.
-    -- Plugin sources (type == "plugin") are toggled in "Plugin sources…";
-    -- patch sources in "Patch sources…".
+    -- curated plugins, then user-configured sources. Plugin sources
+    -- (type == "plugin") are toggled in "Plugin sources…"; patch sources in
+    -- "Patch sources…".
     local plugins_parent_dir = self:getPluginsParentDir()
     local built_ins = {
         { repo = SELF_REPO, type = "plugin", dir = self:getSelfDir(), files = SELF_FILES },
     }
-    for _, repo in ipairs(ZIP_PLUGIN_REPOS) do
+    for _, repo in ipairs(CURATED_PLUGIN_REPOS) do
         table.insert(built_ins, {
             repo = repo,
             type = "plugin",
+            curated = true, -- managed only if already installed (unless opted in)
             dir = plugins_parent_dir .. repo:match("[^/]+$") .. "/",
             -- no `files` field: that absence routes this source through the
             -- zip-extraction branch in syncSources() instead of the
@@ -531,21 +552,31 @@ function Fetcher:syncSources()
         return paths
     end
 
-    -- If every entry shares the same first "/"-delimited segment (root-wrapped
-    -- zip, e.g. "zen_ui.koplugin/main.lua"), return that segment to strip;
-    -- otherwise nil (flat zip).
+    local function splitSegments(path)
+        local segs = {}
+        for s in path:gmatch("[^/]+") do segs[#segs + 1] = s end
+        return segs
+    end
+
+    -- Longest directory path shared by every file entry, so the wrapping
+    -- folder is stripped no matter how deep it is. Handles all the layouts
+    -- real plugin zips use: "zen_ui.koplugin/main.lua" (strip 1),
+    -- "plugins/legado.koplugin/main.lua" (strip 2), a source zipball's
+    -- "owner-repo-sha/main.lua" (strip 1), or flat files (strip 0 -> nil).
+    -- Only leading *directory* segments count — a file's own name never does,
+    -- so a stray top-level file collapses the shared prefix to nothing.
     local function detectZipRootPrefix(paths)
-        local prefix
-        for _, path in ipairs(paths) do
-            local seg = path:match("^([^/]+)/")
-            if not seg then return nil end
-            if prefix == nil then
-                prefix = seg
-            elseif seg ~= prefix then
-                return nil
-            end
+        local common = splitSegments(paths[1])
+        common[#common] = nil -- drop the filename component of the first path
+        for i = 2, #paths do
+            local segs = splitSegments(paths[i])
+            local maxlen = math.min(#common, #segs - 1) -- never include path i's filename
+            local k = 0
+            while k < maxlen and segs[k + 1] == common[k + 1] do k = k + 1 end
+            for j = #common, k + 1, -1 do common[j] = nil end
         end
-        return prefix
+        if #common == 0 then return nil end
+        return table.concat(common, "/")
     end
 
     -- Extract every file in an open Archiver.Reader into dest_dir (created as
@@ -581,9 +612,6 @@ function Fetcher:syncSources()
     end
 
     local installed_tags = self:getSetting("patch_installed_tags", {})
-    local disabled_repos = self:getSetting("disabled_patch_repos", {})
-    local disabled_set = {}
-    for _i, r in ipairs(disabled_repos) do disabled_set[r] = true end
     local disabled_patches = self:getSetting("disabled_patches", {})
     local disabled_patch_set = {}
     for _i, f in ipairs(disabled_patches) do disabled_patch_set[f] = true end
@@ -595,7 +623,7 @@ function Fetcher:syncSources()
 
     for _i, source in ipairs(sources) do
         local repo = source.repo
-        if repo and not disabled_set[repo] then
+        if repo and self:isSourceManaged(source) then
             local repo_short = repo:match("[^/]+$") or repo
             local is_plugin = source.type == "plugin"
             -- One stable heading for the whole step; only the subtitle (the
@@ -645,16 +673,25 @@ function Fetcher:syncSources()
                 end
             elseif release.tag_name ~= installed_tags[repo] and source.type == "plugin" then
                 local zip_asset = findZipAsset(release.assets)
-                if not zip_asset then
-                    table.insert(plugin_failed, repo_short)
+                local final_url, dl_name, dl_size
+                if zip_asset then
+                    final_url = resolveRedirect(zip_asset.browser_download_url)
+                    dl_name = zip_asset.name
+                    dl_size = (zip_asset.size and zip_asset.size > 0) and zip_asset.size or nil
                 else
+                    -- Fallback: the release tag's source zip. codeload serves it
+                    -- directly (no redirect); extractZip strips the
+                    -- "owner-repo-sha/" wrapper. Covers repos that tag releases
+                    -- without attaching a prebuilt .zip asset.
+                    final_url = "https://codeload.github.com/" .. repo .. "/zip/refs/tags/" .. release.tag_name
+                    dl_name = repo_short .. " (source)"
+                end
+                do
                     local tmp_zip = fetcher_tmp_dir .. "/" .. repo_short .. ".zip"
-                    local final_url = resolveRedirect(zip_asset.browser_download_url)
-
                     local progress_dialog = ProgressbarDialog:new{
                         title = T(_("Installing %1"), repo_short),
-                        subtitle = zip_asset.name,
-                        progress_max = (zip_asset.size and zip_asset.size > 0) and zip_asset.size or nil,
+                        subtitle = dl_name,
+                        progress_max = dl_size,
                         refresh_time_seconds = 1,
                     }
                     self:closeStatus()
@@ -916,7 +953,7 @@ end
 
 function Fetcher:init()
     self:migrateLegacySettings()
-    self:seedDefaultDisabledPlugins()
+    self:migrateDisabledRepos()
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
 end

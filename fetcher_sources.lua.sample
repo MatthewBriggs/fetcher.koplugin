@@ -13,9 +13,11 @@
 --                     files as assets; they go into KOReader's `patches/`
 --                     directory. This is the default when no `type` is given.
 --
---   * Plugin source — a whole plugin distributed as a single `.zip` release
---                     asset, extracted into your `plugins/` directory. Set
---                     `type = "plugin"`.
+--   * Plugin source — a whole plugin, extracted into your `plugins/`
+--                     directory. Set `type = "plugin"`. Installed from the
+--                     repo's latest GitHub release — a prebuilt `.zip` asset
+--                     if present, otherwise the release tag's source zip.
+--                     Works best when the plugin's files sit at the repo root.
 --
 -- Only repos you list here (plus Fetcher's built-ins) are ever touched.
 -- Toggle any of them on/off in Fetcher → Settings → Plugin/Patch sources.
