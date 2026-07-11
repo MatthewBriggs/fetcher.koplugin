@@ -76,11 +76,26 @@ Fetcher's own directory (e.g. `plugins/zen_ui.koplugin/`), creating it if
 needed. A plugin whose repo nests its files in an unusual layout may not
 install cleanly — untick it if so.
 
+Update detection reads the version each plugin declares in its own `_meta.lua`
+and compares it semantically to the release, so Fetcher won't re-install the
+same version or downgrade a newer build. Plugins that don't declare a version
+fall back to comparing the release tag.
+
 ## Adding your own sources
 
 Copy [`fetcher_sources.lua.sample`](fetcher_sources.lua.sample) to your KOReader
 `settings/` directory as `fetcher_sources.lua` to add extra patch or plugin
-repos on top of the built-ins. See that file for the format.
+repos on top of the built-ins. Plugin entries can set `preserve_files` to keep
+user-created files (API keys, config) across updates. See that file for the
+format.
+
+## GitHub token (optional)
+
+Fetcher works unauthenticated, but if you manage many repos you can hit
+GitHub's 60-requests/hour API limit. Drop a
+[personal-access token](https://github.com/settings/tokens) (no scopes needed
+for public repos) into `settings/fetcher_github_token.txt` and Fetcher will use
+it, raising the limit to 5000/hour.
 
 ## Development
 

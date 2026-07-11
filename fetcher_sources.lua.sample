@@ -32,5 +32,12 @@ return {
     -- {
     --     repo = "youruser/coolplugin.koplugin",
     --     type = "plugin",
+    --     -- Optional: user files (relative to the plugin dir) to keep across
+    --     -- updates, so a refresh doesn't wipe your API keys / configuration.
+    --     preserve_files = { "config.lua", "apikeys.lua" },
     -- },
 }
+--
+-- Tip: to raise the GitHub API rate limit (60 -> 5000 req/hour), drop a
+-- personal-access token in settings/fetcher_github_token.txt (public repos
+-- need no scopes).

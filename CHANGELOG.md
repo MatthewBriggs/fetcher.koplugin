@@ -2,6 +2,24 @@
 
 All notable changes to Fetcher are documented here.
 
+## v0.7.0
+
+- **Smarter update detection.** Whether a plugin needs updating is now decided
+  from the version it reports in its own `_meta.lua`, compared semantically
+  against the release (so `1.10 > 1.2`, and a `-dev` build is never "downgraded"
+  to the plain release of the same version). This self-corrects from what's
+  actually on disk instead of a settings map that could drift. Plugins that
+  don't declare a readable version fall back to the previous tag-based check.
+- **GitHub token support.** Drop a personal-access token in
+  `settings/fetcher_github_token.txt` to raise the GitHub API limit from 60 to
+  5000 requests/hour; API calls are also lightly rate-limited. No token still
+  works fine.
+- **`preserve_files`.** Plugin updates now keep user-created files (API keys,
+  configuration) across the refresh. Configured for AppStore
+  (`appstore_configuration.lua`) and KoAssistant (`apikeys.lua`,
+  `configuration.lua`, …); you can set `preserve_files` on your own
+  `fetcher_sources.lua` plugin entries too.
+
 ## v0.6.1
 
 - **Atomic plugin installs.** Plugins now extract into a staging folder that is

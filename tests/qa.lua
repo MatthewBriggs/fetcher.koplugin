@@ -65,6 +65,7 @@ local EXTRACT_FAIL_AT = nil      -- extractToPath returns false on the Nth call
 local EXTRACT_ATTEMPTS = 0       -- running count of extractToPath calls
 local DOWNLOAD_FAIL = false      -- file downloads return HTTP 500
 local THROW_ON_REPO = nil        -- error() when this repo's API URL is fetched
+local LAST_API_AUTH = nil        -- Authorization header seen on the last API call
 
 local function preload(name, mod) package.loaded[name] = mod end
 
@@ -149,6 +150,7 @@ preload("socket.http", { request = function() return 1, 200, {} end })
 preload("ssl.https", { request = function(t)
     if t.method == "HEAD" then return 1, 200, {} end
     if t.url:find("api.github.com") then
+        LAST_API_AUTH = t.headers and t.headers["Authorization"]
         if THROW_ON_REPO and t.url:find(THROW_ON_REPO, 1, true) then error("injected API error") end
         PENDING_JSON = FIXTURES[t.url]
         if t.sink then t.sink("json"); t.sink(nil) end
@@ -580,6 +582,96 @@ do
     ok("later good source still installed", exists(good_dir .. "main.lua"))
     ok("good update still counted", pline:find("1 updated", 1, true) ~= nil, pline)
     THROW_ON_REPO = nil
+end
+
+print("\n== version: semantic compare from installed _meta (no downgrade) ==")
+do
+    rmrf(SETTINGS); mkdirp(SETTINGS); rmrf(PLUGINS); mkdirp(PLUGINS); rmrf(DATA); mkdirp(DATA)
+    resetInjection()
+    local f = newInstance()
+    local REPO, dir = "test/ver.koplugin", PLUGINS .. "/ver.koplugin/"
+    f.getSources = function() return { { repo = REPO, type = "plugin", dir = dir } } end
+    ARCHIVE_ENTRIES = { [DATA .. "/fetcher_tmp/ver.koplugin.zip"] = {
+        { path = "ver.koplugin/main.lua", mode = "file" }, { path = "ver.koplugin/_meta.lua", mode = "file" } } }
+    local function installedAs(ver) rmrf(dir); mkdirp(dir); writefile(dir .. "main.lua", "x")
+        writefile(dir .. "_meta.lua", 'return { version = "' .. ver .. '" }') end
+    local function releaseIs(tag) FIXTURES = { ["https://api.github.com/repos/" .. REPO .. "/releases/latest"] =
+        { tag_name = tag, assets = { { name = "ver.koplugin.zip", browser_download_url = "https://dl/v.zip", size = 1 } } } } end
+
+    installedAs("1.2.0"); releaseIs("v1.2.0")
+    local _a, pa = f:syncSources()
+    ok("same version -> no update", pa == "Plugins: up to date ✓", pa)
+
+    installedAs("1.2.0"); releaseIs("v1.10.0")
+    local _b, pb = f:syncSources()
+    ok("newer version (1.10 > 1.2) -> update", pb == "Plugins: 1 updated ✓", pb)
+
+    installedAs("0.20.1-dev"); releaseIs("v0.20.0")
+    local _c, pc = f:syncSources()
+    ok("release older than installed -dev -> NO downgrade", pc == "Plugins: up to date ✓", pc)
+end
+
+print("\n== version: versionless plugin falls back to stored tag ==")
+do
+    rmrf(SETTINGS); mkdirp(SETTINGS); rmrf(PLUGINS); mkdirp(PLUGINS); rmrf(DATA); mkdirp(DATA)
+    resetInjection()
+    local f = newInstance()
+    local REPO, dir = "test/notag.koplugin", PLUGINS .. "/notag.koplugin/"
+    mkdirp(dir); writefile(dir .. "main.lua", "x") -- installed, no readable _meta version
+    f:saveSetting("patch_installed_tags", { [REPO] = "v1" })
+    f.getSources = function() return { { repo = REPO, type = "plugin", dir = dir } } end
+    ARCHIVE_ENTRIES = { [DATA .. "/fetcher_tmp/notag.koplugin.zip"] = { { path = "notag.koplugin/main.lua", mode = "file" } } }
+    FIXTURES = { ["https://api.github.com/repos/" .. REPO .. "/releases/latest"] =
+        { tag_name = "v1", assets = { { name = "notag.koplugin.zip", browser_download_url = "https://dl/n.zip", size = 1 } } } }
+    local _a, pa = f:syncSources()
+    ok("versionless + same tag -> no update (tag fallback)", pa == "Plugins: up to date ✓", pa)
+    FIXTURES["https://api.github.com/repos/" .. REPO .. "/releases/latest"].tag_name = "v2"
+    local _b, pb = f:syncSources()
+    ok("versionless + newer tag -> update (tag fallback)", pb == "Plugins: 1 updated ✓", pb)
+end
+
+print("\n== token: Authorization header when token file present ==")
+do
+    rmrf(SETTINGS); mkdirp(SETTINGS); rmrf(PLUGINS); mkdirp(PLUGINS); rmrf(DATA); mkdirp(DATA)
+    resetInjection()
+    writefile(SETTINGS .. "/fetcher_github_token.txt", "  ghp_TESTTOKEN  \n")
+    local f = newInstance()
+    local REPO = "test/tok.koplugin"
+    f.getSources = function() return { { repo = REPO, type = "plugin", dir = PLUGINS .. "/tok.koplugin/" } } end
+    FIXTURES = { ["https://api.github.com/repos/" .. REPO .. "/releases/latest"] = { tag_name = "v1", assets = {} } }
+    LAST_API_AUTH = nil
+    f:syncSources()
+    ok("token injected + whitespace-trimmed", LAST_API_AUTH == "token ghp_TESTTOKEN", tostring(LAST_API_AUTH))
+
+    -- and absent when no token file
+    os.remove(SETTINGS .. "/fetcher_github_token.txt")
+    local f2 = newInstance()
+    f2.getSources = function() return { { repo = REPO, type = "plugin", dir = PLUGINS .. "/tok.koplugin/" } } end
+    LAST_API_AUTH = "sentinel"
+    f2:syncSources()
+    ok("no token file -> no Authorization header", LAST_API_AUTH == nil)
+end
+
+print("\n== preserve_files: user config survives an update ==")
+do
+    rmrf(SETTINGS); mkdirp(SETTINGS); rmrf(PLUGINS); mkdirp(PLUGINS); rmrf(DATA); mkdirp(DATA)
+    resetInjection()
+    local f = newInstance()
+    local REPO, dir = "test/cfg.koplugin", PLUGINS .. "/cfg.koplugin/"
+    f.getSources = function() return { { repo = REPO, type = "plugin", dir = dir,
+        preserve_files = { "config.lua", "keys/api.txt" } } } end
+    mkdirp(dir); writefile(dir .. "main.lua", "OLD"); writefile(dir .. "_meta.lua", 'return { version = "1.0.0" }')
+    writefile(dir .. "config.lua", "USERCONFIG"); mkdirp(dir .. "keys"); writefile(dir .. "keys/api.txt", "SECRET")
+    -- new release ships only main.lua + _meta.lua (not the user files)
+    ARCHIVE_ENTRIES = { [DATA .. "/fetcher_tmp/cfg.koplugin.zip"] = {
+        { path = "cfg.koplugin/main.lua", mode = "file" }, { path = "cfg.koplugin/_meta.lua", mode = "file" } } }
+    FIXTURES = { ["https://api.github.com/repos/" .. REPO .. "/releases/latest"] =
+        { tag_name = "v2.0.0", assets = { { name = "cfg.koplugin.zip", browser_download_url = "https://dl/c.zip", size = 1 } } } }
+    local _n, p = f:syncSources()
+    ok("update applied", p == "Plugins: 1 updated ✓", p)
+    ok("main.lua replaced with new content", readfile(dir .. "main.lua") == "extracted")
+    ok("preserved config.lua survived", readfile(dir .. "config.lua") == "USERCONFIG")
+    ok("preserved nested keys/api.txt survived", readfile(dir .. "keys/api.txt") == "SECRET")
 end
 
 print("\n== other menu generators ==")

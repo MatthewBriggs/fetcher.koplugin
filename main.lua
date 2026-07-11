@@ -16,20 +16,48 @@ local SELF_FILES = { "main.lua", "_meta.lua" }
 -- They are *offered*, not forced: one that is already installed is kept
 -- updated; one that isn't is shown in "Plugin sources…" but only installed if
 -- the user ticks it (see isSourceManaged / syncSources).
-local CURATED_PLUGIN_REPOS = {
-    "AnthonyGress/zen_ui.koplugin",
-    "AndyHazz/bookends.koplugin",
-    "Euphoriyy/appearance.koplugin",
-    "omer-faruq/appstore.koplugin",
-    "ZlibraryKO/zlibrary.koplugin",
-    "pengcw/legado.koplugin",
-    "greywolf1499/opds_plus.koplugin",
-    "zeeyado/koassistant.koplugin",
-    "dani84bs/AnnotationSync.koplugin",
-    "iceyear/readeck.koplugin",
-    "kristianpennacchia/zzz-readermenuredesign.koplugin",
-    "gitalexcampos/highlightsync.koplugin",
+-- `preserve_files` lists user-created files (relative to the plugin dir) to
+-- carry across updates so a refresh doesn't wipe API keys / configuration.
+local CURATED_PLUGINS = {
+    { repo = "AnthonyGress/zen_ui.koplugin" },
+    { repo = "AndyHazz/bookends.koplugin" },
+    { repo = "Euphoriyy/appearance.koplugin" },
+    { repo = "omer-faruq/appstore.koplugin",
+      preserve_files = { "appstore_configuration.lua" } },
+    { repo = "ZlibraryKO/zlibrary.koplugin" },
+    { repo = "pengcw/legado.koplugin" },
+    { repo = "greywolf1499/opds_plus.koplugin" },
+    { repo = "zeeyado/koassistant.koplugin",
+      preserve_files = { "apikeys.lua", "configuration.lua", "custom_actions.lua", "behaviors", "domains" } },
+    { repo = "dani84bs/AnnotationSync.koplugin" },
+    { repo = "iceyear/readeck.koplugin" },
+    { repo = "kristianpennacchia/zzz-readermenuredesign.koplugin" },
+    { repo = "gitalexcampos/highlightsync.koplugin" },
 }
+
+-- True if version string `a` is strictly newer than `b`. Tolerant of a
+-- leading "v", numeric or string inputs, "." and "-" separators, and unequal
+-- part counts ("1.10" > "1.2", "1.0.0" == "1.0"). Non-numeric parts (e.g. a
+-- "-dev"/"-sha" suffix) count as 0, so a "-dev" build is never "older" than
+-- the plain release of the same version — which stops spurious downgrades.
+local function isVersionNewer(a, b)
+    if not a or not b then return false end
+    a = tostring(a):match("^v?(.*)$")
+    b = tostring(b):match("^v?(.*)$")
+    if a == b then return false end
+    local function parts(v)
+        local t = {}
+        for p in v:gmatch("[^.-]+") do t[#t + 1] = tonumber(p) or 0 end
+        return t
+    end
+    local pa, pb = parts(a), parts(b)
+    for i = 1, math.max(#pa, #pb) do
+        local x, y = pa[i] or 0, pb[i] or 0
+        if x > y then return true end
+        if x < y then return false end
+    end
+    return false
+end
 
 local Fetcher = WidgetContainer:extend{
     name = "fetcher",
@@ -62,6 +90,39 @@ function Fetcher:isPluginInstalled(source)
     if not source.dir then return false end
     local lfs = require("libs/libkoreader-lfs")
     return lfs.attributes((source.dir:gsub("/+$", ""))) ~= nil
+end
+
+-- The version an installed plugin reports in its own _meta.lua, or nil if it
+-- isn't installed or doesn't declare a readable version. This is the source of
+-- truth for "do we need an update", so the decision self-corrects from what's
+-- actually on disk instead of a settings map that can drift.
+function Fetcher:installedPluginVersion(source)
+    if not source.dir then return nil end
+    local lfs = require("libs/libkoreader-lfs")
+    local meta = source.dir:gsub("/+$", "") .. "/_meta.lua"
+    if lfs.attributes(meta, "mode") ~= "file" then return nil end
+    local ok, data = pcall(dofile, meta)
+    if ok and type(data) == "table" and data.version ~= nil then
+        return tostring(data.version)
+    end
+    return nil
+end
+
+-- Optional GitHub personal-access token, read once from a plain-text file the
+-- user drops in the settings dir (settings/fetcher_github_token.txt). Raises
+-- the GitHub API rate limit from 60 to 5000 requests/hour. Empty when absent.
+function Fetcher:getGitHubToken()
+    if self._gh_token_checked then return self._gh_token end
+    self._gh_token_checked = true
+    self._gh_token = nil
+    local path = DataStorage:getSettingsDir() .. "/fetcher_github_token.txt"
+    local f = io.open(path, "r")
+    if f then
+        local token = (f:read("*a") or ""):gsub("%s+", "")
+        f:close()
+        if token ~= "" then self._gh_token = token end
+    end
+    return self._gh_token
 end
 
 -- Whether a source is managed (installed/updated on sync). Explicit user
@@ -435,12 +496,14 @@ function Fetcher:getSources()
     local built_ins = {
         { repo = SELF_REPO, type = "plugin", dir = self:getSelfDir(), files = SELF_FILES },
     }
-    for _, repo in ipairs(CURATED_PLUGIN_REPOS) do
+    for _, entry in ipairs(CURATED_PLUGINS) do
+        local repo = entry.repo
         table.insert(built_ins, {
             repo = repo,
             type = "plugin",
             curated = true, -- managed only if already installed (unless opted in)
             dir = plugins_parent_dir .. repo:match("[^/]+$") .. "/",
+            preserve_files = entry.preserve_files,
             -- no `files` field: that absence routes this source through the
             -- zip-extraction branch in syncSources() instead of the
             -- fixed-file-list branch self uses.
@@ -488,15 +551,30 @@ function Fetcher:syncSources()
         lfs.mkdir(fetcher_tmp_dir)
     end
 
+    local gh_token = self:getGitHubToken()
+
+    -- Space out GitHub API calls a little to stay clear of secondary
+    -- (abuse-detection) rate limits when checking many repos in a row.
+    local last_api_ts = 0
+    local function rateLimit()
+        local now = socket.gettime and socket.gettime() or os.time()
+        local wait = 0.15 - (now - last_api_ts)
+        if wait > 0 and socket.sleep then socket.sleep(wait) end
+        last_api_ts = socket.gettime and socket.gettime() or os.time()
+    end
+
     local function githubGet(url)
+        rateLimit()
+        local headers = {
+            ["Accept"] = "application/vnd.github+json",
+            ["User-Agent"] = "Fetcher-KOReader",
+        }
+        if gh_token then headers["Authorization"] = "token " .. gh_token end
         local chunks = {}
         socketutil:set_timeout()
         local _body, code = https.request{
             url = url,
-            headers = {
-                ["Accept"] = "application/vnd.github+json",
-                ["User-Agent"] = "Fetcher-KOReader",
-            },
+            headers = headers,
             sink = ltn12.sink.table(chunks),
         }
         socketutil:reset_timeout()
@@ -628,6 +706,31 @@ function Fetcher:syncSources()
         end
     end
 
+    local function copyFile(src, dst)
+        local inf = io.open(src, "rb")
+        if not inf then return false end
+        local data = inf:read("*a"); inf:close()
+        local parent = dst:match("^(.*)/")
+        if parent then util.makePath(parent) end
+        local outf = io.open(dst, "wb")
+        if not outf then return false end
+        outf:write(data); outf:close()
+        return true
+    end
+
+    -- Carry user-created files (API keys, config) from the current install
+    -- into the freshly-extracted staging dir, so an update doesn't wipe them.
+    local function preserveUserFiles(source, stage)
+        if not source.preserve_files then return end
+        local live = source.dir:gsub("/+$", "")
+        for _, rel in ipairs(source.preserve_files) do
+            rel = tostring(rel):gsub("^[/\\]+", "")
+            if rel ~= "" and lfs.attributes(live .. "/" .. rel, "mode") == "file" then
+                copyFile(live .. "/" .. rel, stage .. "/" .. rel)
+            end
+        end
+    end
+
     -- Move a freshly-extracted staging dir onto the real plugin dir using
     -- atomic renames, so the live install is never left half-written. Returns
     -- true on success; on failure the previous install is restored untouched.
@@ -671,21 +774,36 @@ function Fetcher:syncSources()
             self:showStatus(_("Plugins & patches"), T(_("Checking %1…"), repo_short))
 
             local release = githubGet("https://api.github.com/repos/" .. repo .. "/releases/latest")
+
+            -- Prefer the installed plugin's own _meta.lua version (self-
+            -- correcting, avoids downgrades); fall back to the last-installed
+            -- tag only for plugins that declare no readable version.
+            local plugin_needs_update = false
+            if release and release.tag_name and is_plugin then
+                local installed_ver = self:installedPluginVersion(source)
+                if installed_ver ~= nil then
+                    plugin_needs_update = isVersionNewer(release.tag_name:gsub("^v", ""), installed_ver)
+                elseif self:isPluginInstalled(source) then
+                    plugin_needs_update = release.tag_name ~= installed_tags[repo]
+                else
+                    plugin_needs_update = true
+                end
+            end
+
             if not release or not release.tag_name then
                 table.insert(is_plugin and plugin_failed or patch_failed, repo_short)
-            elseif release.tag_name ~= installed_tags[repo] and source.type == "plugin" and source.files then
+            elseif is_plugin and source.files and plugin_needs_update then
                 local downloaded = {}
                 for _k, filename in ipairs(source.files) do
                     local url = "https://raw.githubusercontent.com/" .. repo .. "/" .. release.tag_name .. "/" .. filename
                     local dest = source.dir .. filename .. ".new"
 
+                    local hdrs = { ["User-Agent"] = "Fetcher-KOReader", ["Accept-Encoding"] = "identity" }
+                    if gh_token then hdrs["Authorization"] = "token " .. gh_token end
                     socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
                     local dl_code = socket.skip(1, https.request{
                         url = url,
-                        headers = {
-                            ["User-Agent"] = "Fetcher-KOReader",
-                            ["Accept-Encoding"] = "identity",
-                        },
+                        headers = hdrs,
                         sink = ltn12.sink.file(io.open(dest, "w")),
                     })
                     socketutil:reset_timeout()
@@ -710,7 +828,7 @@ function Fetcher:syncSources()
                     end
                     table.insert(plugin_failed, repo_short)
                 end
-            elseif release.tag_name ~= installed_tags[repo] and source.type == "plugin" then
+            elseif is_plugin and plugin_needs_update then
                 local zip_asset = findZipAsset(release.assets)
                 local final_url, dl_name, dl_size
                 if zip_asset then
@@ -776,6 +894,9 @@ function Fetcher:syncSources()
                             reader:close()
                             os.remove(tmp_zip)
 
+                            -- Keep the user's config/keys across the update.
+                            if extract_ok then preserveUserFiles(source, stage) end
+
                             local installed_ok = extract_ok and swapIntoPlace(stage, dest)
                             removeTree(stage) -- no-op once the swap moved it
 
@@ -789,7 +910,7 @@ function Fetcher:syncSources()
                         end
                     end
                 end
-            elseif release.tag_name ~= installed_tags[repo] then
+            elseif not is_plugin and release.tag_name ~= installed_tags[repo] then
                 local assets = release.assets or {}
                 -- Cache known patch names so the menu can show them before download
                 local known = self:getSetting("known_patches", {})
