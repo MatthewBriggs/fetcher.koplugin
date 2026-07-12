@@ -106,6 +106,18 @@ it, raising the limit to 5000/hour.
 - **Release build:** `./build.sh` produces a root-wrapped `fetcher.koplugin.zip`
   ready to attach to a GitHub release or extract into `plugins/`.
 
+## Acknowledgements
+
+Several of Fetcher's plugin-handling ideas — deciding updates from a plugin's
+own declared version, optional GitHub-token authentication, and keeping user
+config files across updates — were inspired by
+[Updates Manager](https://github.com/advokatb/updatesmanager.koplugin) by
+advokatb. Fetcher's implementation is its own (Updates Manager is AGPL-3.0;
+Fetcher is MIT), but credit is due for the approach. If you want a fuller,
+more configurable updates manager, check theirs out.
+
+Thanks also to the authors of the plugins Fetcher helps keep updated.
+
 ## License
 
 [MIT](LICENSE).
