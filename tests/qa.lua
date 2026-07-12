@@ -721,6 +721,20 @@ do
     ok("after connect: sync body runs", #STATUS_LOG >= 1)
 end
 
+print("\n== version display: reads live from _meta.lua next to main.lua ==")
+do
+    local f = newInstance()
+    -- Drop a _meta.lua in the fake plugin dir the harness points getSelfDir at.
+    mkdirp(PLUGINS .. "/fetcher.koplugin")
+    writefile(PLUGINS .. "/fetcher.koplugin/_meta.lua",
+        'return { name = "fetcher", version = "9.8.7" }')
+    ok("getSelfVersion reads the installed _meta.lua", f:getSelfVersion() == "9.8.7")
+    -- Falls back gracefully when the file is missing.
+    f.getSelfDir = function() return WORK .. "/no-such-plugin-dir/" end
+    ok("getSelfVersion falls back to 'unknown' when meta is missing",
+        f:getSelfVersion() == "unknown")
+end
+
 print("\n== runSync smoke (update+opds disabled) ==")
 do
     rmrf(SETTINGS); mkdirp(SETTINGS)

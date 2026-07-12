@@ -2,6 +2,11 @@
 
 All notable changes to Fetcher are documented here.
 
+## v0.9.2
+
+- **Version now shown in Fetcher → Settings** (read live from `_meta.lua`), so
+  it's easy to check which version is running after a self-update.
+
 ## v0.9.1
 
 - **Rate-limit handling.** When Fetcher hits GitHub's API limit (60/hr

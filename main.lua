@@ -121,6 +121,19 @@ function Fetcher:installedPluginVersion(source)
     return nil
 end
 
+-- Read Fetcher's own version from the installed _meta.lua next to main.lua.
+-- Reading it at runtime (rather than hardcoding a constant) means a self-
+-- update automatically flows through to the settings display without
+-- needing to remember to bump two places in sync.
+function Fetcher:getSelfVersion()
+    local path = self:getSelfDir() .. "_meta.lua"
+    local ok, data = pcall(dofile, path)
+    if ok and type(data) == "table" and data.version then
+        return tostring(data.version)
+    end
+    return "unknown"
+end
+
 -- Optional GitHub personal-access token, read once from a plain-text file the
 -- user drops in the settings dir (settings/fetcher_github_token.txt). Raises
 -- the GitHub API rate limit from 60 to 5000 requests/hour. Empty when absent.
@@ -1275,6 +1288,16 @@ function Fetcher:addToMainMenu(menu_items)
             {
                 text = _("Settings"),
                 sub_item_table = {
+                    {
+                        -- Informational: the version of Fetcher currently
+                        -- installed on this device, read live from
+                        -- fetcher.koplugin/_meta.lua on each menu open.
+                        text_func = function()
+                            return _("Version: ") .. self:getSelfVersion()
+                        end,
+                        keep_menu_open = true,
+                        callback = function() end,
+                    },
                     {
                         text = _("KOReader update channel"),
                         sub_item_table = OTAManager:genChannelList(),
