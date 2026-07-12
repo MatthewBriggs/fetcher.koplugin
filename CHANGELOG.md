@@ -2,6 +2,19 @@
 
 All notable changes to Fetcher are documented here.
 
+## v0.9.1
+
+- **Rate-limit handling.** When Fetcher hits GitHub's API limit (60/hr
+  unauthenticated, 5000/hr with a token), it now stops making doomed API
+  requests part-way through and prepends a clear warning to the summary
+  showing when the limit resets and, if no token is present, a hint about
+  adding one. Previously every rate-limited source landed in "failed" with
+  no explanation.
+- **Expanded token security guidance** in the README: use a fine-grained PAT
+  with public-read-only access (or a classic PAT with no scopes), never a
+  broad-scope token, since Fetcher only needs authentication for a higher
+  public-read rate limit.
+
 ## v0.9.0
 
 - **UI reverted to the modal progress dialog** (as in v0.7.x). The persistent
