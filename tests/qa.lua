@@ -202,6 +202,24 @@ preload("ui/widget/progressbardialog", { new = function(_, o)
     STATUS_LOG[#STATUS_LOG + 1] = { title = o and o.title, subtitle = o and o.subtitle }
     return { show = function() end, close = function() end, reportProgress = function() end }
 end })
+-- Stub the StatusBar module. Each set-stage / source event is recorded so
+-- tests can assert the sync drove the bar as expected. The "title" convention
+-- mirrors the old ProgressbarDialog stub so title-flip tests keep passing.
+local StatusBar = { events = {} }
+function StatusBar:new()
+    STATUS_LOG[#STATUS_LOG + 1] = { title = "Fetcher", subtitle = nil }
+    local o = setmetatable({}, { __index = StatusBar })
+    return o
+end
+function StatusBar:show() end
+function StatusBar:setStage(label) STATUS_LOG[#STATUS_LOG + 1] = { title = label } end
+function StatusBar:addSource(id, display) table.insert(StatusBar.events, { "add", id, display }) end
+function StatusBar:sourceRunning(id) table.insert(StatusBar.events, { "run", id }) end
+function StatusBar:sourceProgress(id, pct) table.insert(StatusBar.events, { "prog", id, pct }) end
+function StatusBar:sourceDone(id, ok) table.insert(StatusBar.events, { "done", id, ok }) end
+function StatusBar:finish(label) STATUS_LOG[#STATUS_LOG + 1] = { title = label } end
+function StatusBar:close() end
+preload("statusbar", StatusBar)
 local NetworkMgr = {
     _connected = true,
     isConnected = function(self) return self._connected end,
@@ -709,15 +727,60 @@ do
     NetworkMgr._connected = false
     BEFORE_WIFI_CB = nil
     ui_shown = {}
+    STATUS_LOG = {}
     f:runSync()
-    ok("offline: sync body does not run", #ui_shown == 0)
+    ok("offline: sync body does not run", #ui_shown == 0 and #STATUS_LOG == 0)
     ok("offline: connect flow invoked with retry callback", type(BEFORE_WIFI_CB) == "function")
 
-    -- Wi-Fi comes up, retry callback fires -> body runs.
+    -- Wi-Fi comes up, retry callback fires -> body runs (bar gets created).
     NetworkMgr._connected = true
-    ui_shown = {}
+    STATUS_LOG = {}
     BEFORE_WIFI_CB()
-    ok("after connect: sync body runs", #ui_shown >= 1)
+    ok("after connect: sync body runs", #STATUS_LOG >= 1)
+end
+
+print("\n== status bar: pill events for each source ==")
+do
+    rmrf(SETTINGS); mkdirp(SETTINGS); rmrf(PLUGINS); mkdirp(PLUGINS); rmrf(DATA); mkdirp(DATA)
+    resetInjection()
+    local f = newInstance()
+    local REPO, dir = "test/bar.koplugin", PLUGINS .. "/bar.koplugin/"
+    f.getSources = function() return { { repo = REPO, type = "plugin", dir = dir } } end
+    FIXTURES = { ["https://api.github.com/repos/" .. REPO .. "/releases/latest"] =
+        { tag_name = "v1", assets = { { name = "bar.koplugin.zip", browser_download_url = "https://dl/b.zip", size = 100 } } } }
+    ARCHIVE_ENTRIES = { [DATA .. "/fetcher_tmp/bar.koplugin.zip"] = {
+        { path = "bar.koplugin/main.lua", mode = "file" }, { path = "bar.koplugin/_meta.lua", mode = "file" } } }
+    StatusBar.events = {}
+    f._status_bar = StatusBar:new()
+    f:syncSources()
+    local saw_add, saw_run, saw_done_ok = false, false, false
+    for _, e in ipairs(StatusBar.events) do
+        if e[1] == "add"  and e[2] == REPO then saw_add = true end
+        if e[1] == "run"  and e[2] == REPO then saw_run = true end
+        if e[1] == "done" and e[2] == REPO and e[3] == true then saw_done_ok = true end
+    end
+    ok("bar received addSource for the repo", saw_add)
+    ok("bar received sourceRunning for the repo", saw_run)
+    ok("bar received sourceDone(true) for the repo", saw_done_ok)
+end
+
+print("\n== status bar: failed source shows ✗ (sourceDone false) ==")
+do
+    rmrf(SETTINGS); mkdirp(SETTINGS); rmrf(PLUGINS); mkdirp(PLUGINS); rmrf(DATA); mkdirp(DATA)
+    resetInjection()
+    local f = newInstance()
+    local REPO = "test/badbar.koplugin"
+    f.getSources = function() return { { repo = REPO, type = "plugin", dir = PLUGINS .. "/badbar.koplugin/" } } end
+    FIXTURES = { ["https://api.github.com/repos/" .. REPO .. "/releases/latest"] = { tag_name = "v1", assets = {} } } -- no zip asset
+    ARCHIVE_ENTRIES = {}
+    StatusBar.events = {}
+    f._status_bar = StatusBar:new()
+    f:syncSources()
+    local saw_done_fail = false
+    for _, e in ipairs(StatusBar.events) do
+        if e[1] == "done" and e[2] == REPO and e[3] == false then saw_done_fail = true end
+    end
+    ok("failed source marked done(false)", saw_done_fail)
 end
 
 print("\n== runSync smoke (update+opds disabled) ==")
@@ -728,10 +791,16 @@ do
     f:saveSetting("enable_opds_sync", false)
     f.getSources = function() return {} end
     NetworkMgr._connected = true
-    ui_shown = {}
+    STATUS_LOG = {}
     local good, err = pcall(function() f:runSync() end)
     ok("runSync completes without error", good, err)
-    ok("runSync shows a summary widget", #ui_shown >= 1)
+    ok("runSync drives the status bar", #STATUS_LOG >= 1)
+    -- End-of-sync summary lands as the bar's "All done!" label
+    local saw_done = false
+    for _, e in ipairs(STATUS_LOG) do
+        if e.title == "All done!" then saw_done = true; break end
+    end
+    ok("runSync finishes with 'All done!'", saw_done)
 end
 
 print(string.format("\n==== %d passed, %d failed ====", passed, failed))

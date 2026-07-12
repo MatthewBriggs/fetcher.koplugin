@@ -9,7 +9,7 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local _ = require("gettext")
 
 local SELF_REPO = "MatthewBriggs/fetcher.koplugin"
-local SELF_FILES = { "main.lua", "_meta.lua" }
+local SELF_FILES = { "main.lua", "_meta.lua", "statusbar.lua" }
 
 -- Curated built-in plugin sources: popular KOReader plugins distributed as a
 -- single release .zip (or a release whose source zipball we fall back to).
@@ -323,6 +323,7 @@ function Fetcher:syncOPDS()
 
     local downloaded_urls = self:getSetting("downloaded_urls", {})
 
+    local bar = self._status_bar
     local dl_count = 0
     for i, item in ipairs(pending) do
         local filename = item.file:match("([^/]+)$") or item.file
@@ -342,19 +343,20 @@ function Fetcher:syncOPDS()
             socketutil:reset_timeout()
             local total_bytes = (type(headers) == "table") and tonumber(headers["content-length"]) or nil
 
-            local progress_dialog = ProgressbarDialog:new{
-                title = T(_("Downloading %1 of %2"), i, #pending),
-                subtitle = filename,
-                progress_max = total_bytes,
-                refresh_time_seconds = 1,
-            }
-            self:closeStatus()
-            progress_dialog:show()
-            UIManager:forceRePaint()
+            -- Each book gets its own pill, so the bar shows the queue growing
+            -- with ticks as they land. Truncate long titles to keep the row tidy.
+            local short = filename:len() > 24 and (filename:sub(1, 22) .. "…") or filename
+            local book_id = "book:" .. item.url
+            if bar then
+                bar:addSource(book_id, short)
+                bar:sourceRunning(book_id)
+            end
 
             local file_sink = ltn12.sink.file(io.open(item.file, "w"))
             local progress_sink = socketutil.chainSinkWithProgressCallback(file_sink, function(bytes)
-                progress_dialog:reportProgress(bytes)
+                if bar and total_bytes then
+                    bar:sourceProgress(book_id, (bytes / total_bytes) * 100)
+                end
             end)
 
             socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
@@ -366,14 +368,15 @@ function Fetcher:syncOPDS()
                 password = item.password,
             })
             socketutil:reset_timeout()
-            progress_dialog:close()
 
             if dl_code == 200 then
                 dl_count = dl_count + 1
                 downloaded_urls[item.url] = true
                 self:saveSetting("downloaded_urls", downloaded_urls)
+                if bar then bar:sourceDone(book_id, true) end
             else
                 os.remove(item.file)
+                if bar then bar:sourceDone(book_id, false) end
             end
         end
     end
@@ -780,11 +783,17 @@ function Fetcher:syncSources()
             -- Isolate each source: an unexpected error (truncated write, bad
             -- archive, disk full…) fails just this source rather than aborting
             -- the whole sync. Expected failures still push onto *_failed below.
+            -- Track this repo's pill so we can add / progress / mark it done.
+            local bar = self._status_bar
+            local pill_id = repo
+            if bar then
+                bar:addSource(pill_id, repo_short)
+                bar:sourceRunning(pill_id)
+            end
+            local pill_ok = true
             local ok_iter = pcall(function()
-            -- One stable heading for the whole step; only the subtitle (the
-            -- repo being checked) changes, so the title doesn't flicker
-            -- between "Plugins" and "Patches" as sources are processed.
-            self:showStatus(_("Plugins & patches"), T(_("Checking %1…"), repo_short))
+            -- The bar (stage heading = "Plugins & patches") shows the running
+            -- repo as its current pill; no modal, page-turns keep working.
 
             local release = githubGet("https://api.github.com/repos/" .. repo .. "/releases/latest")
 
@@ -858,19 +867,13 @@ function Fetcher:syncSources()
                 end
                 do
                     local tmp_zip = fetcher_tmp_dir .. "/" .. repo_short .. ".zip"
-                    local progress_dialog = ProgressbarDialog:new{
-                        title = T(_("Installing %1"), repo_short),
-                        subtitle = dl_name,
-                        progress_max = dl_size,
-                        refresh_time_seconds = 1,
-                    }
-                    self:closeStatus()
-                    progress_dialog:show()
-                    UIManager:forceRePaint()
-
+                    -- Route download progress into the bar's current pill
+                    -- instead of a modal dialog, so the reader stays usable.
                     local file_sink = ltn12.sink.file(io.open(tmp_zip, "w"))
                     local progress_sink = socketutil.chainSinkWithProgressCallback(file_sink, function(bytes)
-                        progress_dialog:reportProgress(bytes)
+                        if bar and dl_size and dl_size > 0 then
+                            bar:sourceProgress(pill_id, (bytes / dl_size) * 100)
+                        end
                     end)
 
                     socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
@@ -883,7 +886,6 @@ function Fetcher:syncSources()
                         sink = progress_sink,
                     })
                     socketutil:reset_timeout()
-                    progress_dialog:close()
 
                     if dl_code ~= 200 then
                         os.remove(tmp_zip)
@@ -942,19 +944,14 @@ function Fetcher:syncSources()
                         local dest = patches_dir .. "/" .. asset.name
                         local final_url = resolveRedirect(asset.browser_download_url)
 
-                        local progress_dialog = ProgressbarDialog:new{
-                            title = _("Updating patches"),
-                            subtitle = asset.name,
-                            progress_max = (asset.size and asset.size > 0) and asset.size or nil,
-                            refresh_time_seconds = 1,
-                        }
-                        self:closeStatus()
-                        progress_dialog:show()
-                        UIManager:forceRePaint()
-
+                        -- Route asset download progress into the bar's pill,
+                        -- keeping the reader unblocked.
+                        local size = (asset.size and asset.size > 0) and asset.size or nil
                         local file_sink = ltn12.sink.file(io.open(dest, "w"))
                         local progress_sink = socketutil.chainSinkWithProgressCallback(file_sink, function(bytes)
-                            progress_dialog:reportProgress(bytes)
+                            if bar and size then
+                                bar:sourceProgress(pill_id, (bytes / size) * 100)
+                            end
                         end)
 
                         socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
@@ -967,7 +964,6 @@ function Fetcher:syncSources()
                             sink = progress_sink,
                         })
                         socketutil:reset_timeout()
-                        progress_dialog:close()
 
                         if dl_code == 200 then
                             repo_count = repo_count + 1
@@ -986,7 +982,16 @@ function Fetcher:syncSources()
             end) -- end isolated per-source processing
             if not ok_iter then
                 table.insert(is_plugin and plugin_failed or patch_failed, repo_short)
+                pill_ok = false
+            else
+                -- Look for repo_short in the relevant _failed list (added by
+                -- the branches on any expected failure).
+                local list = is_plugin and plugin_failed or patch_failed
+                for _, f in ipairs(list) do
+                    if f == repo_short then pill_ok = false; break end
+                end
             end
+            if bar then bar:sourceDone(pill_id, pill_ok) end
         end
     end
 
@@ -1020,25 +1025,47 @@ function Fetcher:getPluginsParentDir()
     return self_dir:match("^(.*/)[^/]+/$") or self_dir
 end
 
--- Status dialog helper ------------------------------------------------------
+-- Status bar helpers --------------------------------------------------------
 
-function Fetcher:showStatus(title, subtitle)
-    if self._status_dialog then
-        UIManager:close(self._status_dialog)
+-- showStatus / closeStatus keep their old callers working, but they now drive
+-- the persistent top status bar (see statusbar.lua) instead of a modal
+-- ProgressbarDialog. The `toast = true` trick in that widget means page-turns
+-- pass through to the reader, so a sync no longer blocks reading.
+
+function Fetcher:_bar()
+    if not self._status_bar then
+        -- Lazy + guarded require: if a v0.7.0 install self-updates and
+        -- somehow ends up missing statusbar.lua (e.g. a transient failure to
+        -- download that new file), fall back to a no-op so a sync at least
+        -- runs to completion instead of erroring out.
+        local ok, StatusBar = pcall(require, "statusbar")
+        if not ok then
+            self._status_bar = { setStage = function() end, addSource = function() end,
+                sourceRunning = function() end, sourceProgress = function() end,
+                sourceDone = function() end, finish = function() end,
+                close = function() end, show = function() end }
+        else
+            self._status_bar = StatusBar:new()
+            self._status_bar:show()
+        end
     end
-    local ProgressbarDialog = require("ui/widget/progressbardialog")
-    self._status_dialog = ProgressbarDialog:new{
-        title = title,
-        subtitle = subtitle,
-    }
-    UIManager:show(self._status_dialog)
-    UIManager:forceRePaint()
+    return self._status_bar
+end
+
+function Fetcher:showStatus(title, _subtitle)
+    self:_bar():setStage(title)
 end
 
 function Fetcher:closeStatus()
-    if self._status_dialog then
-        UIManager:close(self._status_dialog)
-        self._status_dialog = nil
+    -- No-op: the bar keeps running through the whole sync. runSync finishes it
+    -- explicitly with a summary; callers that used to close a per-step modal
+    -- simply hand off to the next stage.
+end
+
+function Fetcher:_finishBar(summary_label, auto_close_sec)
+    if self._status_bar then
+        self._status_bar:finish(summary_label, auto_close_sec or 3)
+        self._status_bar = nil
     end
 end
 
@@ -1099,10 +1126,10 @@ function Fetcher:runSync()
             needs_restart = restart or false
         end
 
-        -- Final summary
-        table.insert(lines, "")
-        table.insert(lines, _("Sync complete."))
-        self:closeStatus()
+        -- Wrap the bar up. On a happy sync the bar just says "All done!" for
+        -- a few seconds and vanishes without interrupting reading. If a
+        -- restart or OTA is needed, a ConfirmBox / OTA flow still takes over.
+        self:_finishBar(_("All done!"), 3)
 
         if ota_version and ota_version ~= 0 then
             UIManager:scheduleIn(4, function()
@@ -1110,9 +1137,9 @@ function Fetcher:runSync()
             end)
         end
 
-        local summary_text = table.concat(lines, "\n")
         if needs_restart then
             local ConfirmBox = require("ui/widget/confirmbox")
+            local summary_text = table.concat(lines, "\n")
             UIManager:show(ConfirmBox:new{
                 text = summary_text .. "\n" .. _("Restart KOReader to apply updates?"),
                 ok_text = _("Restart"),
@@ -1120,10 +1147,6 @@ function Fetcher:runSync()
                 ok_callback = function()
                     UIManager:restartKOReader()
                 end,
-            })
-        else
-            UIManager:show(InfoMessage:new{
-                text = summary_text,
             })
         end
     end)

@@ -4,11 +4,11 @@ A KOReader plugin providing a single sync button that updates itself, checks for
 
 ## Features
 
+- **Read while it syncs** — a live status bar at the top shows what's happening (a pill per source, ✓ / ✗, progress bar for the active download) without blocking page-turns
 - **KOReader update check** — checks stable or nightly channel (configurable)
 - **OPDS book sync** — downloads new books from selected catalogs with per-book progress
 - **Plugin sync** — updates whole plugins (including Fetcher itself) from their GitHub `.zip` releases, installing them fresh if missing
 - **Patch sync** — updates individual `.lua` patch files from configured GitHub repos
-- **Single summary screen** — shows results of all sync steps on separate lines, tap to dismiss
 - Accessible from the main menu or ZenUI control panel
 
 ## Requirements

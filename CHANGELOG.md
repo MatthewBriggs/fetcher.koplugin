@@ -2,6 +2,16 @@
 
 All notable changes to Fetcher are documented here.
 
+## v0.8.0
+
+- **Read while syncing.** The sync no longer freezes the reader. In place of
+  the modal progress dialog, a persistent status bar sits at the top of the
+  screen showing exactly what's happening — the current stage, one pill per
+  source (✓ / ✗ / spinning), and a live progress bar for the active download.
+  Because the bar is marked as a toast widget, page-turns and other gestures
+  pass through to the reader underneath: you can keep reading during the sync.
+  Ends with a brief "All done!" that fades away after a few seconds.
+
 ## v0.7.0
 
 - **Smarter update detection.** Whether a plugin needs updating is now decided
