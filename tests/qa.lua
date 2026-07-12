@@ -323,7 +323,7 @@ do
     ok("self is not flagged curated", byrepo["MatthewBriggs/fetcher.koplugin"].curated ~= true)
     local curated_n = 0
     for _, s in ipairs(sources) do if s.curated then curated_n = curated_n + 1 end end
-    ok("curated list has 12 plugins", curated_n == 12, curated_n)
+    ok("curated list has 14 plugins", curated_n == 14, curated_n)
     ok("user plugin source got dir backfilled", byrepo["u/thing.koplugin"]
         and byrepo["u/thing.koplugin"].dir == PLUGINS .. "/thing.koplugin/")
     ok("user patch source has no plugin type", byrepo["u/patches"] and byrepo["u/patches"].type ~= "plugin")
@@ -652,14 +652,14 @@ do
     ok("no token file -> no Authorization header", LAST_API_AUTH == nil)
 end
 
-print("\n== preserve_files: user config survives an update ==")
+print("\n== keep_files: user config survives an update ==")
 do
     rmrf(SETTINGS); mkdirp(SETTINGS); rmrf(PLUGINS); mkdirp(PLUGINS); rmrf(DATA); mkdirp(DATA)
     resetInjection()
     local f = newInstance()
     local REPO, dir = "test/cfg.koplugin", PLUGINS .. "/cfg.koplugin/"
     f.getSources = function() return { { repo = REPO, type = "plugin", dir = dir,
-        preserve_files = { "config.lua", "keys/api.txt" } } } end
+        keep_files = { "config.lua", "keys/api.txt" } } } end
     mkdirp(dir); writefile(dir .. "main.lua", "OLD"); writefile(dir .. "_meta.lua", 'return { version = "1.0.0" }')
     writefile(dir .. "config.lua", "USERCONFIG"); mkdirp(dir .. "keys"); writefile(dir .. "keys/api.txt", "SECRET")
     -- new release ships only main.lua + _meta.lua (not the user files)

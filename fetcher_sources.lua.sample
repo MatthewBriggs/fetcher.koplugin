@@ -34,7 +34,7 @@ return {
     --     type = "plugin",
     --     -- Optional: user files (relative to the plugin dir) to keep across
     --     -- updates, so a refresh doesn't wipe your API keys / configuration.
-    --     preserve_files = { "config.lua", "apikeys.lua" },
+    --     keep_files = { "config.lua", "apikeys.lua" },
     -- },
 }
 --

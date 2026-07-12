@@ -14,11 +14,12 @@ All notable changes to Fetcher are documented here.
   `settings/fetcher_github_token.txt` to raise the GitHub API limit from 60 to
   5000 requests/hour; API calls are also lightly rate-limited. No token still
   works fine.
-- **`preserve_files`.** Plugin updates now keep user-created files (API keys,
+- **`keep_files`.** Plugin updates now keep user-created files (API keys,
   configuration) across the refresh. Configured for AppStore
   (`appstore_configuration.lua`) and KoAssistant (`apikeys.lua`,
-  `configuration.lua`, …); you can set `preserve_files` on your own
+  `configuration.lua`, …); you can set `keep_files` on your own
   `fetcher_sources.lua` plugin entries too.
+- **Two more curated plugins:** Bookshelf and SimpleUI (now 14).
 
 ## v0.6.1
 

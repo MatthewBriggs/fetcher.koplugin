@@ -16,47 +16,60 @@ local SELF_FILES = { "main.lua", "_meta.lua" }
 -- They are *offered*, not forced: one that is already installed is kept
 -- updated; one that isn't is shown in "Plugin sources…" but only installed if
 -- the user ticks it (see isSourceManaged / syncSources).
--- `preserve_files` lists user-created files (relative to the plugin dir) to
--- carry across updates so a refresh doesn't wipe API keys / configuration.
+-- `keep_files` lists user-created files (relative to the plugin dir) to carry
+-- across updates so a refresh doesn't wipe API keys / configuration.
 local CURATED_PLUGINS = {
     { repo = "AnthonyGress/zen_ui.koplugin" },
     { repo = "AndyHazz/bookends.koplugin" },
+    { repo = "AndyHazz/bookshelf.koplugin" },
     { repo = "Euphoriyy/appearance.koplugin" },
+    { repo = "doctorhetfield-cmd/simpleui.koplugin" },
     { repo = "omer-faruq/appstore.koplugin",
-      preserve_files = { "appstore_configuration.lua" } },
+      keep_files = { "appstore_configuration.lua" } },
     { repo = "ZlibraryKO/zlibrary.koplugin" },
     { repo = "pengcw/legado.koplugin" },
     { repo = "greywolf1499/opds_plus.koplugin" },
     { repo = "zeeyado/koassistant.koplugin",
-      preserve_files = { "apikeys.lua", "configuration.lua", "custom_actions.lua", "behaviors", "domains" } },
+      keep_files = { "apikeys.lua", "configuration.lua", "custom_actions.lua", "behaviors", "domains" } },
     { repo = "dani84bs/AnnotationSync.koplugin" },
     { repo = "iceyear/readeck.koplugin" },
     { repo = "kristianpennacchia/zzz-readermenuredesign.koplugin" },
     { repo = "gitalexcampos/highlightsync.koplugin" },
 }
 
--- True if version string `a` is strictly newer than `b`. Tolerant of a
--- leading "v", numeric or string inputs, "." and "-" separators, and unequal
--- part counts ("1.10" > "1.2", "1.0.0" == "1.0"). Non-numeric parts (e.g. a
--- "-dev"/"-sha" suffix) count as 0, so a "-dev" build is never "older" than
--- the plain release of the same version — which stops spurious downgrades.
+-- Split a version string into a list of numeric components. A leading "v" is
+-- dropped; components are separated by "." or "-"; anything non-numeric (a
+-- git-sha or "-dev" build suffix) becomes 0. A trailing sentinel makes the
+-- final component fall out of the same loop.
+local function versionComponents(v)
+    v = tostring(v):gsub("^%s*[vV]", "")
+    local out = {}
+    for token in (v .. "."):gmatch("(.-)[%.%-]") do
+        out[#out + 1] = tonumber(token) or 0
+    end
+    return out
+end
+
+-- Three-way version compare: 1 if `a` outranks `b`, -1 if it trails, 0 equal.
+-- Missing trailing components read as 0 ("1.0" == "1.0.0"), and larger numbers
+-- win componentwise ("1.10" > "1.2").
+local function compareVersions(a, b)
+    local ca, cb = versionComponents(a), versionComponents(b)
+    for i = 1, math.max(#ca, #cb) do
+        local diff = (ca[i] or 0) - (cb[i] or 0)
+        if diff ~= 0 then
+            return diff > 0 and 1 or -1
+        end
+    end
+    return 0
+end
+
+-- True only when `a` is strictly newer than `b`; used so an update never
+-- reinstalls the same version or downgrades a newer build (e.g. a local
+-- "0.20.1-dev" is not replaced by release "0.20.0").
 local function isVersionNewer(a, b)
     if not a or not b then return false end
-    a = tostring(a):match("^v?(.*)$")
-    b = tostring(b):match("^v?(.*)$")
-    if a == b then return false end
-    local function parts(v)
-        local t = {}
-        for p in v:gmatch("[^.-]+") do t[#t + 1] = tonumber(p) or 0 end
-        return t
-    end
-    local pa, pb = parts(a), parts(b)
-    for i = 1, math.max(#pa, #pb) do
-        local x, y = pa[i] or 0, pb[i] or 0
-        if x > y then return true end
-        if x < y then return false end
-    end
-    return false
+    return compareVersions(a, b) == 1
 end
 
 local Fetcher = WidgetContainer:extend{
@@ -503,7 +516,7 @@ function Fetcher:getSources()
             type = "plugin",
             curated = true, -- managed only if already installed (unless opted in)
             dir = plugins_parent_dir .. repo:match("[^/]+$") .. "/",
-            preserve_files = entry.preserve_files,
+            keep_files = entry.keep_files,
             -- no `files` field: that absence routes this source through the
             -- zip-extraction branch in syncSources() instead of the
             -- fixed-file-list branch self uses.
@@ -720,10 +733,10 @@ function Fetcher:syncSources()
 
     -- Carry user-created files (API keys, config) from the current install
     -- into the freshly-extracted staging dir, so an update doesn't wipe them.
-    local function preserveUserFiles(source, stage)
-        if not source.preserve_files then return end
+    local function keepUserFiles(source, stage)
+        if not source.keep_files then return end
         local live = source.dir:gsub("/+$", "")
-        for _, rel in ipairs(source.preserve_files) do
+        for _, rel in ipairs(source.keep_files) do
             rel = tostring(rel):gsub("^[/\\]+", "")
             if rel ~= "" and lfs.attributes(live .. "/" .. rel, "mode") == "file" then
                 copyFile(live .. "/" .. rel, stage .. "/" .. rel)
@@ -895,7 +908,7 @@ function Fetcher:syncSources()
                             os.remove(tmp_zip)
 
                             -- Keep the user's config/keys across the update.
-                            if extract_ok then preserveUserFiles(source, stage) end
+                            if extract_ok then keepUserFiles(source, stage) end
 
                             local installed_ok = extract_ok and swapIntoPlace(stage, dest)
                             removeTree(stage) -- no-op once the swap moved it

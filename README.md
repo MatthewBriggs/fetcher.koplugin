@@ -58,9 +58,9 @@ and prompts a restart.
 ## Built-in plugin updates
 
 Fetcher ships with a curated list of popular KOReader plugins as built-in
-**plugin sources** — ZenUI, Bookends, Appearance, AppStore, zlibrary, Legado,
-OPDS+, KoAssistant, AnnotationSync, Readeck, ReaderMenuRedesign, and
-HighlightSync.
+**plugin sources** — ZenUI, Bookends, Bookshelf, Appearance, SimpleUI,
+AppStore, zlibrary, Legado, OPDS+, KoAssistant, AnnotationSync, Readeck,
+ReaderMenuRedesign, and HighlightSync.
 
 **Manage-if-installed:** a curated plugin that's **already on your device** is
 kept updated automatically. One that **isn't installed** shows up in
@@ -85,7 +85,7 @@ fall back to comparing the release tag.
 
 Copy [`fetcher_sources.lua.sample`](fetcher_sources.lua.sample) to your KOReader
 `settings/` directory as `fetcher_sources.lua` to add extra patch or plugin
-repos on top of the built-ins. Plugin entries can set `preserve_files` to keep
+repos on top of the built-ins. Plugin entries can set `keep_files` to keep
 user-created files (API keys, config) across updates. See that file for the
 format.
 
