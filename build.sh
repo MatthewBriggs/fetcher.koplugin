@@ -11,7 +11,7 @@ OUT="$PLUGIN.zip"
 BUILD_DIR="build/$PLUGIN"
 
 # Files that ship in the plugin (code + docs). Keep in sync with the repo.
-FILES="main.lua _meta.lua statusbar.lua README.md LICENSE CHANGELOG.md fetcher_sources.lua.sample"
+FILES="main.lua _meta.lua README.md LICENSE CHANGELOG.md fetcher_sources.lua.sample"
 
 rm -rf build "$OUT"
 mkdir -p "$BUILD_DIR"

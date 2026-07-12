@@ -4,7 +4,6 @@ A KOReader plugin providing a single sync button that updates itself, checks for
 
 ## Features
 
-- **Read while it syncs** — a live status bar at the top shows what's happening (a pill per source, ✓ / ✗, progress bar for the active download) without blocking page-turns
 - **KOReader update check** — checks stable or nightly channel (configurable)
 - **OPDS book sync** — downloads new books from selected catalogs with per-book progress
 - **Plugin sync** — updates whole plugins (including Fetcher itself) from their GitHub `.zip` releases, installing them fresh if missing
@@ -91,11 +90,45 @@ format.
 
 ## GitHub token (optional)
 
-Fetcher works unauthenticated, but if you manage many repos you can hit
-GitHub's 60-requests/hour API limit. Drop a
-[personal-access token](https://github.com/settings/tokens) (no scopes needed
-for public repos) into `settings/fetcher_github_token.txt` and Fetcher will use
-it, raising the limit to 5000/hour.
+Fetcher works unauthenticated, but if you manage many repos or sync often you
+can hit GitHub's 60-requests/hour API limit. When it does hit the limit,
+Fetcher now short-circuits the remaining API calls and shows a warning telling
+you when the limit resets, rather than reporting every source as "failed".
+
+Dropping a personal-access token into `settings/fetcher_github_token.txt` on
+your device raises the limit to 5000/hour.
+
+### Security: use the smallest-scope token you can
+
+Fetcher only makes **unauthenticated-equivalent public API reads** — it never
+writes, never touches private data, never needs any repo permissions. The
+token is just there to tell GitHub who's asking, so you get the higher rate
+limit. So the safest possible token is one with **zero scopes and zero
+repository access**: if it gets stolen (e.g. someone grabs your ereader), all
+they can do with it is make public API GETs at 5000/hr — the same thing you
+just used it for.
+
+Recommended: create a **fine-grained** personal access token at
+<https://github.com/settings/personal-access-tokens/new> with:
+
+- **Repository access**: *Public Repositories (read-only)* — or even *No
+  repositories* if that's an option in your GitHub setup.
+- **Repository permissions**: leave everything at *No access*.
+- **Account permissions**: leave everything at *No access*.
+- **Expiration**: whatever you're comfortable with (30 / 90 / 365 days).
+
+A classic ("legacy") PAT with no scopes ticked also works, and is a valid
+fallback if fine-grained tokens aren't available for you.
+
+**Do not** use a broad-scope token (`repo`, `workflow`, `gist`, `admin:*`) —
+that would give an attacker who reads the file from a stolen device full
+control of your GitHub repos, the ability to push malicious CI, etc. Fetcher
+doesn't need any of that.
+
+Once you have the token, save it in `settings/fetcher_github_token.txt` on
+your device (one line, plain text). To revoke it later, delete it from
+<https://github.com/settings/tokens> and Fetcher will fall back to
+unauthenticated 60/hr.
 
 ## Development
 

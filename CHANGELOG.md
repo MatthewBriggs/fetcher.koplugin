@@ -2,15 +2,21 @@
 
 All notable changes to Fetcher are documented here.
 
-## v0.8.0
+## v0.9.0
 
-- **Read while syncing.** The sync no longer freezes the reader. In place of
-  the modal progress dialog, a persistent status bar sits at the top of the
-  screen showing exactly what's happening — the current stage, one pill per
-  source (✓ / ✗ / spinning), and a live progress bar for the active download.
-  Because the bar is marked as a toast widget, page-turns and other gestures
-  pass through to the reader underneath: you can keep reading during the sync.
-  Ends with a brief "All done!" that fades away after a few seconds.
+- **UI reverted to the modal progress dialog** (as in v0.7.x). The persistent
+  top status bar introduced in v0.8.0 turned out to fit poorly with what
+  Fetcher actually is: a deliberate, one-tap action that takes seconds. A
+  centered modal is clearer to read, less clever, and better matches user
+  intent than a subtle top strip trying not to interrupt reading. The v0.8
+  branch is deleted; the status bar module (`statusbar.lua`) is gone.
+- **Kept from v0.8**: sync activity is logged to `settings/fetcher.log`, with
+  a new **Tools → Fetcher → Show last sync log** menu item that displays the
+  last ~80 lines in a scrollable dialog. Handy for diagnosing quiet syncs
+  ("did it actually run? which sources were checked?").
+- **Kept from v0.8**: an unexpected error inside the sync is now caught, the
+  modal closes cleanly, and an error dialog is shown — so a crash can't leave
+  a dangling progress dialog on top of the reader.
 
 ## v0.7.0
 

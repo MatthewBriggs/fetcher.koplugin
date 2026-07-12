@@ -9,7 +9,7 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local _ = require("gettext")
 
 local SELF_REPO = "MatthewBriggs/fetcher.koplugin"
-local SELF_FILES = { "main.lua", "_meta.lua", "statusbar.lua" }
+local SELF_FILES = { "main.lua", "_meta.lua" }
 
 -- Curated built-in plugin sources: popular KOReader plugins distributed as a
 -- single release .zip (or a release whose source zipball we fall back to).
@@ -323,7 +323,6 @@ function Fetcher:syncOPDS()
 
     local downloaded_urls = self:getSetting("downloaded_urls", {})
 
-    local bar = self._status_bar
     local dl_count = 0
     for i, item in ipairs(pending) do
         local filename = item.file:match("([^/]+)$") or item.file
@@ -343,20 +342,19 @@ function Fetcher:syncOPDS()
             socketutil:reset_timeout()
             local total_bytes = (type(headers) == "table") and tonumber(headers["content-length"]) or nil
 
-            -- Each book gets its own pill, so the bar shows the queue growing
-            -- with ticks as they land. Truncate long titles to keep the row tidy.
-            local short = filename:len() > 24 and (filename:sub(1, 22) .. "…") or filename
-            local book_id = "book:" .. item.url
-            if bar then
-                bar:addSource(book_id, short)
-                bar:sourceRunning(book_id)
-            end
+            local progress_dialog = ProgressbarDialog:new{
+                title = T(_("Downloading %1 of %2"), i, #pending),
+                subtitle = filename,
+                progress_max = total_bytes,
+                refresh_time_seconds = 1,
+            }
+            self:closeStatus()
+            progress_dialog:show()
+            UIManager:forceRePaint()
 
             local file_sink = ltn12.sink.file(io.open(item.file, "w"))
             local progress_sink = socketutil.chainSinkWithProgressCallback(file_sink, function(bytes)
-                if bar and total_bytes then
-                    bar:sourceProgress(book_id, (bytes / total_bytes) * 100)
-                end
+                progress_dialog:reportProgress(bytes)
             end)
 
             socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
@@ -368,15 +366,14 @@ function Fetcher:syncOPDS()
                 password = item.password,
             })
             socketutil:reset_timeout()
+            progress_dialog:close()
 
             if dl_code == 200 then
                 dl_count = dl_count + 1
                 downloaded_urls[item.url] = true
                 self:saveSetting("downloaded_urls", downloaded_urls)
-                if bar then bar:sourceDone(book_id, true) end
             else
                 os.remove(item.file)
-                if bar then bar:sourceDone(book_id, false) end
             end
         end
     end
@@ -579,7 +576,15 @@ function Fetcher:syncSources()
         last_api_ts = socket.gettime and socket.gettime() or os.time()
     end
 
+    -- Rate-limit shared across all githubGet calls in this sync. Once we hit
+    -- 403 with X-RateLimit-Remaining: 0, no further API calls will succeed
+    -- until the reset time — so short-circuit them (returning nil) instead of
+    -- making dozens of doomed requests. Reset epoch is exposed via the outer
+    -- self so the summary can render a meaningful warning.
+    self._rate_limited_until = nil
+
     local function githubGet(url)
+        if self._rate_limited_until then return nil end
         rateLimit()
         local headers = {
             ["Accept"] = "application/vnd.github+json",
@@ -588,12 +593,21 @@ function Fetcher:syncSources()
         if gh_token then headers["Authorization"] = "token " .. gh_token end
         local chunks = {}
         socketutil:set_timeout()
-        local _body, code = https.request{
+        local _body, code, resp_headers = https.request{
             url = url,
             headers = headers,
             sink = ltn12.sink.table(chunks),
         }
         socketutil:reset_timeout()
+        -- Detect GitHub rate limiting. GitHub returns 403 with
+        -- X-RateLimit-Remaining: 0 (and the reset epoch in X-RateLimit-Reset).
+        if code == 403 and type(resp_headers) == "table" then
+            local remaining = tonumber(resp_headers["x-ratelimit-remaining"])
+            local reset = tonumber(resp_headers["x-ratelimit-reset"])
+            if remaining == 0 and reset then
+                self._rate_limited_until = reset
+            end
+        end
         if code ~= 200 then return nil end
         local ok, data = pcall(json.decode, table.concat(chunks))
         return ok and data or nil
@@ -783,17 +797,8 @@ function Fetcher:syncSources()
             -- Isolate each source: an unexpected error (truncated write, bad
             -- archive, disk full…) fails just this source rather than aborting
             -- the whole sync. Expected failures still push onto *_failed below.
-            -- Track this repo's pill so we can add / progress / mark it done.
-            local bar = self._status_bar
-            local pill_id = repo
-            if bar then
-                bar:addSource(pill_id, repo_short)
-                bar:sourceRunning(pill_id)
-            end
-            local pill_ok = true
             local ok_iter = pcall(function()
-            -- The bar (stage heading = "Plugins & patches") shows the running
-            -- repo as its current pill; no modal, page-turns keep working.
+            self:showStatus(_("Plugins & patches"), T(_("Checking %1…"), repo_short))
 
             local release = githubGet("https://api.github.com/repos/" .. repo .. "/releases/latest")
 
@@ -867,13 +872,19 @@ function Fetcher:syncSources()
                 end
                 do
                     local tmp_zip = fetcher_tmp_dir .. "/" .. repo_short .. ".zip"
-                    -- Route download progress into the bar's current pill
-                    -- instead of a modal dialog, so the reader stays usable.
+                    local progress_dialog = ProgressbarDialog:new{
+                        title = T(_("Installing %1"), repo_short),
+                        subtitle = dl_name,
+                        progress_max = dl_size,
+                        refresh_time_seconds = 1,
+                    }
+                    self:closeStatus()
+                    progress_dialog:show()
+                    UIManager:forceRePaint()
+
                     local file_sink = ltn12.sink.file(io.open(tmp_zip, "w"))
                     local progress_sink = socketutil.chainSinkWithProgressCallback(file_sink, function(bytes)
-                        if bar and dl_size and dl_size > 0 then
-                            bar:sourceProgress(pill_id, (bytes / dl_size) * 100)
-                        end
+                        progress_dialog:reportProgress(bytes)
                     end)
 
                     socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
@@ -886,6 +897,7 @@ function Fetcher:syncSources()
                         sink = progress_sink,
                     })
                     socketutil:reset_timeout()
+                    progress_dialog:close()
 
                     if dl_code ~= 200 then
                         os.remove(tmp_zip)
@@ -944,14 +956,19 @@ function Fetcher:syncSources()
                         local dest = patches_dir .. "/" .. asset.name
                         local final_url = resolveRedirect(asset.browser_download_url)
 
-                        -- Route asset download progress into the bar's pill,
-                        -- keeping the reader unblocked.
-                        local size = (asset.size and asset.size > 0) and asset.size or nil
+                        local progress_dialog = ProgressbarDialog:new{
+                            title = _("Updating patches"),
+                            subtitle = asset.name,
+                            progress_max = (asset.size and asset.size > 0) and asset.size or nil,
+                            refresh_time_seconds = 1,
+                        }
+                        self:closeStatus()
+                        progress_dialog:show()
+                        UIManager:forceRePaint()
+
                         local file_sink = ltn12.sink.file(io.open(dest, "w"))
                         local progress_sink = socketutil.chainSinkWithProgressCallback(file_sink, function(bytes)
-                            if bar and size then
-                                bar:sourceProgress(pill_id, (bytes / size) * 100)
-                            end
+                            progress_dialog:reportProgress(bytes)
                         end)
 
                         socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
@@ -964,6 +981,7 @@ function Fetcher:syncSources()
                             sink = progress_sink,
                         })
                         socketutil:reset_timeout()
+                        progress_dialog:close()
 
                         if dl_code == 200 then
                             repo_count = repo_count + 1
@@ -982,16 +1000,7 @@ function Fetcher:syncSources()
             end) -- end isolated per-source processing
             if not ok_iter then
                 table.insert(is_plugin and plugin_failed or patch_failed, repo_short)
-                pill_ok = false
-            else
-                -- Look for repo_short in the relevant _failed list (added by
-                -- the branches on any expected failure).
-                local list = is_plugin and plugin_failed or patch_failed
-                for _, f in ipairs(list) do
-                    if f == repo_short then pill_ok = false; break end
-                end
             end
-            if bar then bar:sourceDone(pill_id, pill_ok) end
         end
     end
 
@@ -1032,40 +1041,65 @@ end
 -- ProgressbarDialog. The `toast = true` trick in that widget means page-turns
 -- pass through to the reader, so a sync no longer blocks reading.
 
-function Fetcher:_bar()
-    if not self._status_bar then
-        -- Lazy + guarded require: if a v0.7.0 install self-updates and
-        -- somehow ends up missing statusbar.lua (e.g. a transient failure to
-        -- download that new file), fall back to a no-op so a sync at least
-        -- runs to completion instead of erroring out.
-        local ok, StatusBar = pcall(require, "statusbar")
-        if not ok then
-            self._status_bar = { setStage = function() end, addSource = function() end,
-                sourceRunning = function() end, sourceProgress = function() end,
-                sourceDone = function() end, finish = function() end,
-                close = function() end, show = function() end }
-        else
-            self._status_bar = StatusBar:new()
-            self._status_bar:show()
+-- Show the tail of the sync log (last ~50 lines) in a scrollable dialog, so
+-- the user can see what actually happened when the bar flashed by too fast.
+function Fetcher:showLog()
+    local path = DataStorage:getSettingsDir() .. "/fetcher.log"
+    local f = io.open(path, "r")
+    local content
+    if not f then
+        content = "No sync log yet — tap 'Sync now' first."
+    else
+        local all = f:read("*a") or ""
+        f:close()
+        -- Show last N lines; the file grows but is never rotated.
+        local tail = {}
+        for line in all:gmatch("([^\n]+)") do
+            table.insert(tail, line)
+            if #tail > 80 then table.remove(tail, 1) end
         end
+        content = table.concat(tail, "\n")
+        if content == "" then content = "(log file is empty)" end
     end
-    return self._status_bar
+    local TextViewer = require("ui/widget/textviewer")
+    UIManager:show(TextViewer:new{
+        title = _("Fetcher — last sync log"),
+        text = content,
+    })
 end
 
-function Fetcher:showStatus(title, _subtitle)
-    self:_bar():setStage(title)
+-- Append a timestamped line to settings/fetcher.log. Cheap; no rotation
+-- (file grows a few KB per sync). Purpose: give the user a paper trail of
+-- what actually happened when the bar flashed by too fast to read.
+function Fetcher:_log(msg)
+    local path = DataStorage:getSettingsDir() .. "/fetcher.log"
+    local f = io.open(path, "a")
+    if not f then return end
+    f:write(os.date("%Y-%m-%d %H:%M:%S"), "  ", tostring(msg), "\n")
+    f:close()
+end
+
+-- Modal status dialog. A conscious "Sync now" tap is short — a centered
+-- ProgressbarDialog is clearer than a subtle top strip trying not to
+-- interrupt reading. Per-download modals underneath show byte-level progress.
+
+function Fetcher:showStatus(title, subtitle)
+    if self._status_dialog then
+        UIManager:close(self._status_dialog)
+    end
+    local ProgressbarDialog = require("ui/widget/progressbardialog")
+    self._status_dialog = ProgressbarDialog:new{
+        title = title,
+        subtitle = subtitle,
+    }
+    UIManager:show(self._status_dialog)
+    UIManager:forceRePaint()
 end
 
 function Fetcher:closeStatus()
-    -- No-op: the bar keeps running through the whole sync. runSync finishes it
-    -- explicitly with a summary; callers that used to close a per-step modal
-    -- simply hand off to the next stage.
-end
-
-function Fetcher:_finishBar(summary_label, auto_close_sec)
-    if self._status_bar then
-        self._status_bar:finish(summary_label, auto_close_sec or 3)
-        self._status_bar = nil
+    if self._status_dialog then
+        UIManager:close(self._status_dialog)
+        self._status_dialog = nil
     end
 end
 
@@ -1083,73 +1117,123 @@ function Fetcher:runSync()
         return
     end
     NetworkMgr:runWhenOnline(function()
-        local enable_update  = self:getSetting("enable_koreader_update", true)
-        local enable_opds    = self:getSetting("enable_opds_sync", true)
-        local T = require("ffi/util").template
-        local lines = {}
-
-        -- Step 1: KOReader update
-        local ota_version, ota_package
-        if enable_update then
-            self:showStatus(_("KOReader Update"), _("Checking for updates…"))
-            if OTAManager:getOTAType() == "none" then
-                table.insert(lines, _("KOReader: emulator — skipping update"))
-            else
-                local _lv, _lk
-                ota_version, _lv, _lk, ota_package = OTAManager:checkUpdate()
-                if ota_version == 0 then
-                    table.insert(lines, _("KOReader: up to date ✓"))
-                elseif ota_version then
-                    table.insert(lines, _("KOReader: update available!"))
-                else
-                    table.insert(lines, _("KOReader: update check failed"))
-                end
-            end
-        end
-
-        -- Step 2: OPDS books
-        if enable_opds then
-            self:showStatus(_("Books"), _("Checking for new books…"))
-            local ok, msg = self:syncOPDS()
-            table.insert(lines, msg or _("Books: up to date ✓"))
-        end
-
-        -- Step 3: Plugins and patches (reported as separate lines)
-        local needs_restart = false
-        self:showStatus(_("Plugins & patches"), _("Checking for updates…"))
-        local pcall_ok, restart, plugin_line, patch_line = pcall(function() return self:syncSources() end)
-        if not pcall_ok then
-            table.insert(lines, "Plugins & patches: error — " .. tostring(restart))
-        else
-            table.insert(lines, plugin_line or _("Plugins: up to date ✓"))
-            table.insert(lines, patch_line or _("Patches: up to date ✓"))
-            needs_restart = restart or false
-        end
-
-        -- Wrap the bar up. On a happy sync the bar just says "All done!" for
-        -- a few seconds and vanishes without interrupting reading. If a
-        -- restart or OTA is needed, a ConfirmBox / OTA flow still takes over.
-        self:_finishBar(_("All done!"), 3)
-
-        if ota_version and ota_version ~= 0 then
-            UIManager:scheduleIn(4, function()
-                OTAManager:fetchAndProcessUpdate()
-            end)
-        end
-
-        if needs_restart then
-            local ConfirmBox = require("ui/widget/confirmbox")
-            local summary_text = table.concat(lines, "\n")
-            UIManager:show(ConfirmBox:new{
-                text = summary_text .. "\n" .. _("Restart KOReader to apply updates?"),
-                ok_text = _("Restart"),
-                cancel_text = _("Later"),
-                ok_callback = function()
-                    UIManager:restartKOReader()
-                end,
+        self:_log("--- sync start ---")
+        -- Wrap the whole sync body in a pcall so an unexpected error still
+        -- closes the modal cleanly and reports something readable, instead of
+        -- leaving a dangling status dialog on top of the reader.
+        local sync_ok, sync_err = pcall(function() self:_doSync() end)
+        if not sync_ok then
+            self:_log("sync ERROR: " .. tostring(sync_err))
+            self:closeStatus()
+            local InfoMessage = require("ui/widget/infomessage")
+            UIManager:show(InfoMessage:new{
+                text = "Fetcher sync failed:\n" .. tostring(sync_err),
             })
         end
+        self:_log("--- sync end ---")
     end)
+end
+
+function Fetcher:_doSync()
+    local enable_update = self:getSetting("enable_koreader_update", true)
+    local enable_opds   = self:getSetting("enable_opds_sync", true)
+    local lines = {}
+
+    -- Step 1: KOReader update
+    local ota_version, ota_package
+    if enable_update then
+        self:showStatus(_("KOReader Update"), _("Checking for updates…"))
+        if OTAManager:getOTAType() == "none" then
+            table.insert(lines, _("KOReader: emulator — skipping update"))
+            self:_log("KOReader: emulator, skipped")
+        else
+            local _lv, _lk
+            ota_version, _lv, _lk, ota_package = OTAManager:checkUpdate()
+            if ota_version == 0 then
+                table.insert(lines, _("KOReader: up to date ✓"))
+                self:_log("KOReader: up to date")
+            elseif ota_version then
+                table.insert(lines, _("KOReader: update available!"))
+                self:_log("KOReader: update available (" .. tostring(ota_version) .. ")")
+            else
+                table.insert(lines, _("KOReader: update check failed"))
+                self:_log("KOReader: update check failed")
+            end
+        end
+    else
+        self:_log("KOReader update: disabled in settings")
+    end
+
+    -- Step 2: OPDS books
+    if enable_opds then
+        self:showStatus(_("Books"), _("Checking for new books…"))
+        local ok, msg = self:syncOPDS()
+        table.insert(lines, msg or _("Books: up to date ✓"))
+        self:_log("OPDS: " .. tostring(msg or "up to date"))
+    else
+        self:_log("OPDS: disabled in settings")
+    end
+
+    -- Step 3: Plugins and patches (reported as separate lines)
+    local needs_restart = false
+    self:showStatus(_("Plugins & patches"), _("Checking for updates…"))
+    local pcall_ok, restart, plugin_line, patch_line = pcall(function() return self:syncSources() end)
+    if not pcall_ok then
+        table.insert(lines, "Plugins & patches: error — " .. tostring(restart))
+        self:_log("syncSources ERROR: " .. tostring(restart))
+    else
+        table.insert(lines, plugin_line or _("Plugins: up to date ✓"))
+        table.insert(lines, patch_line or _("Patches: up to date ✓"))
+        self:_log("Plugins: " .. tostring(plugin_line or "up to date"))
+        self:_log("Patches: " .. tostring(patch_line or "up to date"))
+        needs_restart = restart or false
+    end
+
+    -- If the sync hit GitHub's API rate limit part-way through, prepend a
+    -- clear warning so the user knows the "failed" sources aren't broken —
+    -- they were skipped because the API stopped answering. Include the reset
+    -- time (local) and a hint about the token file that raises the limit.
+    if self._rate_limited_until then
+        local mins = math.max(1, math.ceil((self._rate_limited_until - os.time()) / 60))
+        local reset_hhmm = os.date("%H:%M", self._rate_limited_until)
+        local has_token = self:getGitHubToken() ~= nil
+        local warn = string.format(
+            "⚠ Hit GitHub API rate limit — retry after %s (%d min).\n"
+            .. "Any \"failed\" sources below are just skipped, not broken.",
+            reset_hhmm, mins)
+        if not has_token then
+            warn = warn .. "\nTip: add a personal-access token to "
+                .. "settings/fetcher_github_token.txt to raise the limit "
+                .. "from 60 to 5000/hr."
+        end
+        table.insert(lines, 1, warn)
+        table.insert(lines, 2, "")
+        self:_log("RATE-LIMITED until " .. os.date("%H:%M", self._rate_limited_until))
+    end
+
+    -- Final summary
+    table.insert(lines, "")
+    table.insert(lines, _("Sync complete."))
+    self:closeStatus()
+
+    if ota_version and ota_version ~= 0 then
+        UIManager:scheduleIn(4, function()
+            OTAManager:fetchAndProcessUpdate()
+        end)
+    end
+
+    local summary_text = table.concat(lines, "\n")
+    if needs_restart then
+        local ConfirmBox = require("ui/widget/confirmbox")
+        UIManager:show(ConfirmBox:new{
+            text = summary_text .. "\n" .. _("Restart KOReader to apply updates?"),
+            ok_text = _("Restart"),
+            cancel_text = _("Later"),
+            ok_callback = function() UIManager:restartKOReader() end,
+        })
+    else
+        UIManager:show(InfoMessage:new{ text = summary_text })
+    end
 end
 
 -- Dispatcher / menu ---------------------------------------------------------
@@ -1182,6 +1266,11 @@ function Fetcher:addToMainMenu(menu_items)
             {
                 text = _("Sync now"),
                 callback = function() self:runSync() end,
+            },
+            {
+                text = _("Show last sync log"),
+                keep_menu_open = true,
+                callback = function() self:showLog() end,
             },
             {
                 text = _("Settings"),
