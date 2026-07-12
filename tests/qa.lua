@@ -323,7 +323,7 @@ do
     ok("self is not flagged curated", byrepo["MatthewBriggs/fetcher.koplugin"].curated ~= true)
     local curated_n = 0
     for _, s in ipairs(sources) do if s.curated then curated_n = curated_n + 1 end end
-    ok("curated list has 14 plugins", curated_n == 14, curated_n)
+    ok("curated list has 15 plugins", curated_n == 15, curated_n)
     ok("user plugin source got dir backfilled", byrepo["u/thing.koplugin"]
         and byrepo["u/thing.koplugin"].dir == PLUGINS .. "/thing.koplugin/")
     ok("user patch source has no plugin type", byrepo["u/patches"] and byrepo["u/patches"].type ~= "plugin")

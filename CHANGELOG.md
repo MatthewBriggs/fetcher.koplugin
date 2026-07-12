@@ -2,6 +2,11 @@
 
 All notable changes to Fetcher are documented here.
 
+## v0.9.3
+
+- **One more curated plugin:** [BatteryGraph](https://github.com/ura23/batterygraph.koplugin)
+  (battery-usage history graph). Curated list now 15.
+
 ## v0.9.2
 
 - **Version now shown in Fetcher → Settings** (read live from `_meta.lua`), so

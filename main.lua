@@ -35,6 +35,7 @@ local CURATED_PLUGINS = {
     { repo = "iceyear/readeck.koplugin" },
     { repo = "kristianpennacchia/zzz-readermenuredesign.koplugin" },
     { repo = "gitalexcampos/highlightsync.koplugin" },
+    { repo = "ura23/batterygraph.koplugin" },
 }
 
 -- Split a version string into a list of numeric components. A leading "v" is

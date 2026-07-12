@@ -59,7 +59,7 @@ and prompts a restart.
 Fetcher ships with a curated list of popular KOReader plugins as built-in
 **plugin sources** — ZenUI, Bookends, Bookshelf, Appearance, SimpleUI,
 AppStore, zlibrary, Legado, OPDS+, KoAssistant, AnnotationSync, Readeck,
-ReaderMenuRedesign, and HighlightSync.
+ReaderMenuRedesign, HighlightSync, and BatteryGraph.
 
 **Manage-if-installed:** a curated plugin that's **already on your device** is
 kept updated automatically. One that **isn't installed** shows up in
