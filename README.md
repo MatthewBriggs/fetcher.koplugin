@@ -1,11 +1,6 @@
 # Fetcher
 
-> One tap. Everything on your ereader up to date.
-
-Fetcher is a KOReader plugin that turns *"is there anything new?"* into a
-single tap. It checks for a KOReader update, pulls new books from your OPDS
-catalogs, keeps a curated set of popular KOReader plugins current, refreshes
-patches — and updates itself along the way.
+**TLDR: A plugin to keep koreader, OPDS-sourced books, plugins and patches up-to-date with one tap.**
 
 <!-- TODO: screenshot of the sync-in-progress dialog goes here -->
 
