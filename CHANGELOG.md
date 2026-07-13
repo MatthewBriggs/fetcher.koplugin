@@ -2,6 +2,13 @@
 
 All notable changes to Fetcher are documented here.
 
+## v0.9.4
+
+- **Fix misleading book download count.** The progress dialog previously
+  said e.g. "Downloading 1 of 16" when only 3 books would actually be
+  downloaded (13 of the 16 were already in the local cache). Fetcher now
+  pre-filters to real work and shows an accurate "Downloading 1 of 3".
+
 ## v0.9.3
 
 - **One more curated plugin:** [BatteryGraph](https://github.com/ura23/batterygraph.koplugin)

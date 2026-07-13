@@ -337,58 +337,71 @@ function Fetcher:syncOPDS()
 
     local downloaded_urls = self:getSetting("downloaded_urls", {})
 
+    -- Pre-filter: `pending` is the whole OPDS "new" feed (which can hold
+    -- hundreds of previously-synced entries), but most of them are already
+    -- downloaded or on disk. Building `to_download` first means the progress
+    -- dialog says "Downloading 1 of 3" for real, not "1 of 16" when 13 are
+    -- immediately skipped.
+    local to_download = {}
+    for _, item in ipairs(pending) do
+        if force or not downloaded_urls[item.url] then
+            if not lfs.attributes(item.file) then
+                table.insert(to_download, item)
+            end
+        end
+    end
+    if #to_download == 0 then
+        return true, _("Books: up to date ✓")
+    end
+
     local dl_count = 0
-    for i, item in ipairs(pending) do
+    for i, item in ipairs(to_download) do
         local filename = item.file:match("([^/]+)$") or item.file
 
-        if not force and downloaded_urls[item.url] then
-            -- already downloaded in a previous sync, skip regardless of filename
-        elseif not lfs.attributes(item.file) then
-            socketutil:set_timeout()
-            local _body, _code, headers = http.request{
-                method = "HEAD",
-                url = item.url,
-                user = item.username,
-                password = item.password,
-                sink = ltn12.sink.null(),
-                headers = { ["Accept-Encoding"] = "identity" },
-            }
-            socketutil:reset_timeout()
-            local total_bytes = (type(headers) == "table") and tonumber(headers["content-length"]) or nil
+        socketutil:set_timeout()
+        local _body, _code, headers = http.request{
+            method = "HEAD",
+            url = item.url,
+            user = item.username,
+            password = item.password,
+            sink = ltn12.sink.null(),
+            headers = { ["Accept-Encoding"] = "identity" },
+        }
+        socketutil:reset_timeout()
+        local total_bytes = (type(headers) == "table") and tonumber(headers["content-length"]) or nil
 
-            local progress_dialog = ProgressbarDialog:new{
-                title = T(_("Downloading %1 of %2"), i, #pending),
-                subtitle = filename,
-                progress_max = total_bytes,
-                refresh_time_seconds = 1,
-            }
-            self:closeStatus()
-            progress_dialog:show()
-            UIManager:forceRePaint()
+        local progress_dialog = ProgressbarDialog:new{
+            title = T(_("Downloading %1 of %2"), i, #to_download),
+            subtitle = filename,
+            progress_max = total_bytes,
+            refresh_time_seconds = 1,
+        }
+        self:closeStatus()
+        progress_dialog:show()
+        UIManager:forceRePaint()
 
-            local file_sink = ltn12.sink.file(io.open(item.file, "w"))
-            local progress_sink = socketutil.chainSinkWithProgressCallback(file_sink, function(bytes)
-                progress_dialog:reportProgress(bytes)
-            end)
+        local file_sink = ltn12.sink.file(io.open(item.file, "w"))
+        local progress_sink = socketutil.chainSinkWithProgressCallback(file_sink, function(bytes)
+            progress_dialog:reportProgress(bytes)
+        end)
 
-            socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
-            local dl_code = socket.skip(1, http.request{
-                url = item.url,
-                headers = { ["Accept-Encoding"] = "identity" },
-                sink = progress_sink,
-                user = item.username,
-                password = item.password,
-            })
-            socketutil:reset_timeout()
-            progress_dialog:close()
+        socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
+        local dl_code = socket.skip(1, http.request{
+            url = item.url,
+            headers = { ["Accept-Encoding"] = "identity" },
+            sink = progress_sink,
+            user = item.username,
+            password = item.password,
+        })
+        socketutil:reset_timeout()
+        progress_dialog:close()
 
-            if dl_code == 200 then
-                dl_count = dl_count + 1
-                downloaded_urls[item.url] = true
-                self:saveSetting("downloaded_urls", downloaded_urls)
-            else
-                os.remove(item.file)
-            end
+        if dl_code == 200 then
+            dl_count = dl_count + 1
+            downloaded_urls[item.url] = true
+            self:saveSetting("downloaded_urls", downloaded_urls)
+        else
+            os.remove(item.file)
         end
     end
 
