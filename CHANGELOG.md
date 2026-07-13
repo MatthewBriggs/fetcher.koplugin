@@ -2,6 +2,14 @@
 
 All notable changes to Fetcher are documented here.
 
+## v0.9.5
+
+- **Fix Fetcher modal opening under KOReader's "Connecting to <SSID>" dialog.**
+  When the sync had to bring Wi-Fi up first, Fetcher's status modal could
+  open before KOReader's reconnection banner had dismissed, obscuring
+  Fetcher's progress until the WiFi dialog closed. Fetcher now waits a
+  moment after WiFi comes up before starting the sync.
+
 ## v0.9.4
 
 - **Fix misleading book download count.** The progress dialog previously

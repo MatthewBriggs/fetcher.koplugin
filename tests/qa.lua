@@ -192,7 +192,9 @@ local ui_shown = {}
 preload("ui/uimanager", {
     show = function(_, w) ui_shown[#ui_shown + 1] = w end,
     close = function() end, forceRePaint = function() end,
-    scheduleIn = function() end, nextTick = function(_, fn) if fn then fn() end end,
+    -- Run deferred callbacks immediately in tests: we're not testing timing.
+    scheduleIn = function(_, _, fn) if fn then fn() end end,
+    nextTick = function(_, fn) if fn then fn() end end,
     restartKOReader = function() end,
 })
 local function widgetstub() return setmetatable({}, { __index = function() return function() end end }) end

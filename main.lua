@@ -1140,7 +1140,12 @@ function Fetcher:runSync()
     -- KOReader's connect flow (turn Wi-Fi on / prompt, per the user's
     -- settings) and re-run the sync once it's up, rather than running offline.
     if not NetworkMgr:isConnected() then
-        NetworkMgr:beforeWifiAction(function() self:runSync() end)
+        -- Wait a beat after WiFi comes up so KOReader's own "Connecting to
+        -- <SSID>" dialog has time to dismiss. Without this, Fetcher's modal
+        -- can open under it and the user only sees the reconnection banner.
+        NetworkMgr:beforeWifiAction(function()
+            UIManager:scheduleIn(1, function() self:runSync() end)
+        end)
         return
     end
     NetworkMgr:runWhenOnline(function()
