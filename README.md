@@ -1,13 +1,46 @@
 # Fetcher
 
-A KOReader plugin providing a single sync button that updates itself, checks for KOReader updates, syncs new books from OPDS catalogs, and keeps patches and plugins up to date.
+> One tap. Everything on your ereader up to date.
 
-## Features
+Fetcher is a KOReader plugin that turns *"is there anything new?"* into a
+single tap. It checks for a KOReader update, pulls new books from your OPDS
+catalogs, keeps a curated set of popular KOReader plugins current, refreshes
+patches — and updates itself along the way.
 
-- **KOReader update check** — checks stable or nightly channel (configurable)
+<!-- TODO: screenshot of the sync-in-progress dialog goes here -->
+
+### What happens when you tap "Sync now"
+
+A modal walks through each step and reports what happened at the end:
+
+1. **KOReader** — checks for an OTA update (stable or nightly, your choice) and offers to install if one's available
+2. **Books** — downloads any new titles from the OPDS catalogs you've ticked, straight to your reader
+3. **Plugins** — brings any of ~15 [curated plugins](#built-in-plugin-updates) up to their latest GitHub release, if you have them installed
+4. **Patches** — pulls the latest `.lua` patches from any user-patch repos you've configured
+
+Then a summary dialog like:
+
+> KOReader: up to date ✓
+> Books: 2 downloaded ✓
+> Plugins: 1 updated ✓
+> Patches: up to date ✓
+
+If something needed a restart to take effect, you get one prompt at the end.
+
+### Who it's for
+
+- You run KOReader on **more than one device** and are tired of USB-cable dances to keep everything in sync
+- You have an **OPDS catalog** (Calibre-Web, Kavita, Komga, calibre's built-in server, KOReader's own server, …) and want your reader to pull new books itself
+- You use a few **user patches** or community plugins and want them kept current without babysitting
+
+### Features
+
+- **KOReader update check** — stable or nightly channel (configurable)
 - **OPDS book sync** — downloads new books from selected catalogs with per-book progress
-- **Plugin sync** — updates whole plugins (including Fetcher itself) from their GitHub `.zip` releases, installing them fresh if missing
+- **Plugin sync** — updates whole plugins (including Fetcher itself) from their GitHub `.zip` releases; a curated list of ~15 popular ones is built in, and you can add your own
 - **Patch sync** — updates individual `.lua` patch files from configured GitHub repos
+- **Manage-if-installed** — a curated plugin you don't already have is *offered*, not forced: it shows in the settings list with "(not installed)" and is only installed if you tick it
+- **Safe installs** — plugin extraction is atomic (staged then swapped), guarded against zip-slip, and user config files can be preserved across updates
 - Accessible from the main menu or ZenUI control panel
 
 ## Requirements
@@ -27,10 +60,25 @@ Once installed, Fetcher keeps itself updated.
 
 ## Setup
 
-1. Configure your OPDS catalogs in the OPDS Catalog plugin first
-2. Go to **Fetcher → Settings → Select OPDS catalogs** and tick the ones to sync
-3. Set a sync folder in the OPDS Catalog plugin (Sync → Set sync folder)
-4. Add a Fetcher button to the ZenUI control panel via ZenUI Settings → Control → Customize buttons → pick "Fetcher: Sync now"
+Fetcher works out of the box — you can tap **Fetcher → Sync now** immediately
+and it'll do the KOReader update check + self-update. The other steps only
+matter if you want them:
+
+- **For book downloads** (optional): first add your OPDS catalog(s) via
+  KOReader's built-in **OPDS Catalog** plugin, then set a sync folder in
+  **OPDS Catalog → Sync → Set sync folder**, then in **Fetcher → Settings →
+  Select OPDS catalogs** tick the ones you want. If you don't use OPDS, leave
+  it — Fetcher just skips that step.
+- **For plugin updates** (optional): tick the ones you want under
+  **Fetcher → Settings → Plugin sources…**. Plugins you already have
+  installed are on automatically; not-installed ones stay off until you opt
+  in.
+- **For patch updates** (optional): create
+  `settings/fetcher_sources.lua` listing your GitHub patch repos. See
+  [`fetcher_sources.lua.sample`](fetcher_sources.lua.sample) for the format.
+- **Handy shortcut**: if you use the ZenUI plugin, add a Fetcher button to
+  its control panel via *ZenUI Settings → Control → Customize buttons →
+  "Fetcher: Sync now"*.
 
 ## Settings
 
