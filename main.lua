@@ -1091,28 +1091,83 @@ function Fetcher:hasZenPM()
     return nil
 end
 
+-- Snapshot the installed packages ZenPM knows about, as { id = version }.
+-- Fetcher uses this before + after `package update` to compute what changed,
+-- since the CLI's stdout doesn't tell us. Parses `package list koreader`'s
+-- tab-separated columns: ID<TAB>NAME<TAB>VERSION<TAB>PLATFORM<TAB>REPO<TAB>INSTALLED.
+function Fetcher:_zenpmInstalledMap(quoted_binary)
+    local cmd = "ZENPM_PLATFORM=koreader " .. quoted_binary
+        .. " package list koreader 2>/dev/null"
+    local pipe = io.popen(cmd, "r")
+    local map = {}
+    if not pipe then return map end
+    for line in pipe:lines() do
+        local id, _name, version, _plat, _repo, installed =
+            line:match("^([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)$")
+        if id and installed == "yes" then
+            map[id] = version
+        end
+    end
+    pipe:close()
+    return map
+end
+
+-- ZenPM's CLI doesn't expose a package's plugin-vs-patch category, but every
+-- patch package in the ZenLabs catalog has "patch" in its id (koreader-patches,
+-- koreader-patches-2, koreader-frankenpatches-public …). Matches ZenPM's own
+-- category-based classification for every case in the current catalog.
+local function is_patch_id(id)
+    return id and id:lower():find("patch", 1, true) ~= nil
+end
+
 -- Run "zenpm package update" (empty target = update all installed packages).
--- Synchronous — CLI returns when done, exit 0 on success. Returns
--- (ok:boolean, message:string). We don't need zen-pm's HTTP daemon for this:
--- the CLI operates directly on state files and works whether the daemon is
--- running or not.
+-- Synchronous — CLI returns when done, exit 0 on success. Diffs installed
+-- state before + after to report an accurate plugin/patch count in Fetcher's
+-- summary, rather than a generic "done". Returns (ok, message, needs_restart).
+-- We don't need zen-pm's HTTP daemon: the CLI operates directly on state
+-- files and works whether the daemon is running or not.
 function Fetcher:runZenPMUpdate(binary)
     -- shell-quote via double quotes with backslash-escaped inner quotes.
     local function q(s) return '"' .. (s:gsub('"', '\\"')) .. '"' end
-    -- zen-pm expects ZENPM_PLATFORM; koreader is the correct value for us.
-    local cmd = "ZENPM_PLATFORM=koreader " .. q(binary)
-        .. " package update 2>&1"
+    local qb = q(binary)
+
+    local pre = self:_zenpmInstalledMap(qb)
+
+    local cmd = "ZENPM_PLATFORM=koreader " .. qb .. " package update 2>&1"
     self:_log("ZenPM: running " .. cmd)
     local pipe = io.popen(cmd, "r")
-    if not pipe then return false, "ZenPM: failed to launch backend" end
+    if not pipe then return false, "ZenPM: failed to launch backend", false end
     local output = pipe:read("*a") or ""
     local ok = pipe:close()
     for line in output:gmatch("[^\r\n]+") do self:_log("ZenPM: " .. line) end
-    if ok then
-        return true, "ZenPM: updates applied ✓"
-    else
-        return false, "ZenPM: update failed — see Fetcher log"
+    if not ok then
+        return false, "ZenPM: update failed — see Fetcher log", false
     end
+
+    -- Diff: id's version changed (or newly present) counts as an update.
+    local post = self:_zenpmInstalledMap(qb)
+    local plugin_updated, patch_updated = 0, 0
+    for id, ver in pairs(post) do
+        if pre[id] ~= ver then
+            if is_patch_id(id) then patch_updated = patch_updated + 1
+            else plugin_updated = plugin_updated + 1 end
+        end
+    end
+
+    local msg
+    if plugin_updated == 0 and patch_updated == 0 then
+        msg = "ZenPM: up to date ✓"
+    else
+        local bits = {}
+        if plugin_updated > 0 then
+            bits[#bits + 1] = plugin_updated .. " plugin" .. (plugin_updated == 1 and "" or "s")
+        end
+        if patch_updated > 0 then
+            bits[#bits + 1] = patch_updated .. " patch" .. (patch_updated == 1 and "" or "es")
+        end
+        msg = "ZenPM: " .. table.concat(bits, ", ") .. " updated ✓"
+    end
+    return true, msg, (plugin_updated + patch_updated) > 0
 end
 
 -- Status bar helpers --------------------------------------------------------
@@ -1269,15 +1324,16 @@ function Fetcher:_doSync()
         -- is worse than picking one. Fetcher stays responsible for KOReader
         -- OTA, OPDS books, and its own self-update.
         self:showStatus(_("Plugins & patches"), _("Updating via ZenPM…"))
-        local ok_iter, ok_upd, msg = pcall(function() return self:runZenPMUpdate(zenpm_binary) end)
+        local ok_iter, ok_upd, msg, restart = pcall(function() return self:runZenPMUpdate(zenpm_binary) end)
         if not ok_iter then
             table.insert(lines, "ZenPM: error — " .. tostring(ok_upd))
+            self:_log("ZenPM ERROR: " .. tostring(ok_upd))
         else
             table.insert(lines, msg or "ZenPM: done")
-            -- ZenPM manages its own install/uninstall side-effects. We only
-            -- prompt for a restart if the user has extra Fetcher-managed
-            -- sources (which we still keep flexible to add later); today it's
-            -- safe to assume no restart is needed for a pure ZenPM delegation.
+            self:_log(tostring(msg or "ZenPM: done"))
+            -- If ZenPM actually installed/updated any packages, prompt for a
+            -- restart — new plugin code doesn't load until KOReader restarts.
+            needs_restart = restart or false
         end
     else
         self:showStatus(_("Plugins & patches"), _("Checking for updates…"))

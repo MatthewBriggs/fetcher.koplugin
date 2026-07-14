@@ -772,6 +772,44 @@ do
     os.execute("chmod +x " .. PLUGINS .. "/fake-zenpm-fail")
     local ok_upd_fail = f:runZenPMUpdate(PLUGINS .. "/fake-zenpm-fail")
     ok("runZenPMUpdate: failure path returns (false, ...)", ok_upd_fail == false)
+
+    -- Plugin/patch count + classification. Fake zenpm returns different
+    -- `package list` output on subcommand: "package list" gives the snapshot,
+    -- "package update" is a no-op. We control state with a marker file so the
+    -- 2nd list call (post-update) returns a different version → an "update".
+    local marker = PLUGINS .. "/zenpm-marker"
+    os.remove(marker)
+    writefile(PLUGINS .. "/fake-zenpm-classified", table.concat({
+        '#!/bin/sh',
+        'case "$1 $2" in',
+        '  "package list")',
+        '    printf "ID\\tNAME\\tVERSION\\tPLATFORM\\tREPO\\tINSTALLED\\n"',
+        '    if [ -f "' .. marker .. '" ]; then',
+        '      # post-update snapshot: bookends bumped, patches bumped, appearance unchanged',
+        '      printf "bookends\\tBookends\\t5.22.1\\tkoreader\\tZenLabs\\tyes\\n"',
+        '      printf "appearance\\tAppearance\\t1.5.1\\tkoreader\\tZenLabs\\tyes\\n"',
+        '      printf "koreader-patches\\tKoreader Patches\\t1.0.7\\tkoreader\\tZenLabs\\tyes\\n"',
+        '    else',
+        '      # pre-update snapshot',
+        '      printf "bookends\\tBookends\\t5.22.0\\tkoreader\\tZenLabs\\tyes\\n"',
+        '      printf "appearance\\tAppearance\\t1.5.1\\tkoreader\\tZenLabs\\tyes\\n"',
+        '      printf "koreader-patches\\tKoreader Patches\\t1.0.6\\tkoreader\\tZenLabs\\tyes\\n"',
+        '    fi',
+        '  ;;',
+        '  "package update")',
+        '    touch "' .. marker .. '"',
+        '    exit 0',
+        '  ;;',
+        'esac',
+        '',
+    }, "\n"))
+    os.execute("chmod +x " .. PLUGINS .. "/fake-zenpm-classified")
+    local ok_c, msg_c, restart_c = f:runZenPMUpdate(PLUGINS .. "/fake-zenpm-classified")
+    ok("classified update: ok=true", ok_c == true)
+    ok("classified update: reports 1 plugin, 1 patch",
+        msg_c == "ZenPM: 1 plugin, 1 patch updated ✓", tostring(msg_c))
+    ok("classified update: needs_restart=true when work was done", restart_c == true)
+    os.remove(marker)
 end
 
 print("\n== runSync end-to-end delegates to ZenPM when present ==")

@@ -2,6 +2,18 @@
 
 All notable changes to Fetcher are documented here.
 
+## v0.10.1
+
+- **ZenPM delegation now differentiates plugins from patches** in the summary.
+  Instead of the generic "ZenPM: updates applied ✓", Fetcher diffs ZenPM's
+  installed state before + after the run and reports e.g.
+  "ZenPM: 2 plugins, 1 patch updated ✓". If nothing changed, "ZenPM: up to
+  date ✓". Fetcher also now prompts a restart when ZenPM did any work — new
+  plugin code needs a KOReader restart to load.
+- Classification uses an id-name heuristic (matches ZenPM's own
+  category-based classification for every package in the current ZenLabs
+  catalog).
+
 ## v0.10.0
 
 - **ZenPM delegation.** If [ZenPM](https://github.com/xZenLabs/zen-pm) is
