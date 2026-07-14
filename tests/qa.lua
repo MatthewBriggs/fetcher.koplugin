@@ -737,6 +737,63 @@ do
         f:getSelfVersion() == "unknown")
 end
 
+print("\n== ZenPM delegation ==")
+do
+    rmrf(SETTINGS); mkdirp(SETTINGS); rmrf(PLUGINS); mkdirp(PLUGINS); rmrf(DATA); mkdirp(DATA)
+    resetInjection()
+    local f = newInstance()
+
+    -- No zenpm.koplugin present -> hasZenPM returns nil.
+    ok("hasZenPM: nil when no zenpm.koplugin sibling", f:hasZenPM() == nil)
+
+    -- Drop a fake zenpm binary and confirm detection.
+    mkdirp(PLUGINS .. "/zenpm.koplugin/backend")
+    writefile(PLUGINS .. "/zenpm.koplugin/backend/zenpm-darwin", "fake binary")
+    local found = f:hasZenPM()
+    ok("hasZenPM: returns binary path when present",
+        found == PLUGINS .. "/zenpm.koplugin/backend/zenpm-darwin", tostring(found))
+
+    -- Unknown-name binary is picked up by the "zenpm-*" fallback glob.
+    os.remove(PLUGINS .. "/zenpm.koplugin/backend/zenpm-darwin")
+    writefile(PLUGINS .. "/zenpm.koplugin/backend/zenpm-newplatform", "fake")
+    ok("hasZenPM: glob fallback finds zenpm-* files",
+        f:hasZenPM() == PLUGINS .. "/zenpm.koplugin/backend/zenpm-newplatform")
+
+    -- runZenPMUpdate: shell out to /bin/true masquerading as a zenpm binary.
+    -- io.popen is real in the harness; using a script that succeeds silently
+    -- exercises the ok path without needing zen-pm.
+    writefile(PLUGINS .. "/fake-zenpm", "#!/bin/sh\necho 'faked update' \n exit 0\n")
+    os.execute("chmod +x " .. PLUGINS .. "/fake-zenpm")
+    local ok_upd, msg = f:runZenPMUpdate(PLUGINS .. "/fake-zenpm")
+    ok("runZenPMUpdate: success path returns (true, ...)", ok_upd == true, tostring(msg))
+
+    -- Failure path: a script that exits non-zero.
+    writefile(PLUGINS .. "/fake-zenpm-fail", "#!/bin/sh\necho 'oops'\nexit 1\n")
+    os.execute("chmod +x " .. PLUGINS .. "/fake-zenpm-fail")
+    local ok_upd_fail = f:runZenPMUpdate(PLUGINS .. "/fake-zenpm-fail")
+    ok("runZenPMUpdate: failure path returns (false, ...)", ok_upd_fail == false)
+end
+
+print("\n== runSync end-to-end delegates to ZenPM when present ==")
+do
+    rmrf(SETTINGS); mkdirp(SETTINGS); rmrf(PLUGINS); mkdirp(PLUGINS); rmrf(DATA); mkdirp(DATA)
+    resetInjection()
+    local f = newInstance()
+    f:saveSetting("enable_koreader_update", false)
+    f:saveSetting("enable_opds_sync", false)
+    -- Install a fake zenpm binary; syncSources should NEVER run.
+    mkdirp(PLUGINS .. "/zenpm.koplugin/backend")
+    writefile(PLUGINS .. "/zenpm.koplugin/backend/zenpm-darwin",
+        "#!/bin/sh\nexit 0\n")
+    os.execute("chmod +x " .. PLUGINS .. "/zenpm.koplugin/backend/zenpm-darwin")
+    -- Sabotage syncSources so if it's called we'll notice.
+    local sync_sources_called = false
+    f.syncSources = function() sync_sources_called = true; return false, "PL", "PT" end
+    NetworkMgr._connected = true
+    f:runSync()
+    ok("syncSources NOT called when ZenPM is installed", not sync_sources_called)
+end
+
 print("\n== runSync smoke (update+opds disabled) ==")
 do
     rmrf(SETTINGS); mkdirp(SETTINGS)

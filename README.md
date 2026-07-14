@@ -123,6 +123,18 @@ and compares it semantically to the release, so Fetcher won't re-install the
 same version or downgrade a newer build. Plugins that don't declare a version
 fall back to comparing the release tag.
 
+## Delegating to ZenPM
+
+If [ZenPM](https://github.com/xZenLabs/zen-pm) is installed as a sibling
+koplugin (i.e. `plugins/zenpm.koplugin/` exists next to `fetcher.koplugin/`),
+Fetcher will hand its plugin + patch updates over to ZenPM's `package update`
+CLI on every sync — silently, no ZenPM UI pops up. You keep Fetcher's
+one-tap sync flow, but the actual plugin management is done in one place.
+
+You don't need to do anything to enable this — Fetcher detects the ZenPM
+binary on each sync. If ZenPM isn't installed, Fetcher's own plugin+patch
+sync runs as before.
+
 ## Adding your own sources
 
 Copy [`fetcher_sources.lua.sample`](fetcher_sources.lua.sample) to your KOReader

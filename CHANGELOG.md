@@ -2,6 +2,16 @@
 
 All notable changes to Fetcher are documented here.
 
+## v0.10.0
+
+- **ZenPM delegation.** If [ZenPM](https://github.com/xZenLabs/zen-pm) is
+  installed as a sibling koplugin, Fetcher hands its plugin + patch updates
+  over to ZenPM's `package update` CLI in the background. ZenPM's catalog
+  covers everything Fetcher's curated list did (plus a lot more), and having
+  two tools race to manage the same install is worse than picking one.
+  Fetcher stays responsible for KOReader OTA, OPDS book downloads, and its
+  own self-update. If ZenPM isn't installed, Fetcher works exactly as before.
+
 ## v0.9.5
 
 - **Fix Fetcher modal opening under KOReader's "Connecting to <SSID>" dialog.**

@@ -1061,6 +1061,60 @@ function Fetcher:getPluginsParentDir()
     return self_dir:match("^(.*/)[^/]+/$") or self_dir
 end
 
+-- ZenPM delegation ----------------------------------------------------------
+
+-- Return the path to zen-pm's bundled backend binary if it's installed as a
+-- sibling koplugin, else nil. zen-pm ships one Mach-O per platform under
+-- plugins/zenpm.koplugin/backend/; we try the ones we know about, and also
+-- fall back to a directory glob for anything we don't recognise.
+function Fetcher:hasZenPM()
+    local lfs = require("libs/libkoreader-lfs")
+    local dir = self:getPluginsParentDir() .. "zenpm.koplugin/backend"
+    if lfs.attributes(dir, "mode") ~= "directory" then return nil end
+    -- Known bundled binary names by platform.
+    local candidates = {
+        "zenpm-darwin", "zenpm-linux",
+        "zenpm-kobo-hf", "zenpm-kobo-sf",
+        "zenpm-kindle-hf", "zenpm-kindle-sf",
+    }
+    for _, name in ipairs(candidates) do
+        local path = dir .. "/" .. name
+        if lfs.attributes(path, "mode") == "file" then return path end
+    end
+    -- Fallback: first executable-looking file that starts with "zenpm-".
+    for entry in lfs.dir(dir) do
+        if entry:sub(1, 6) == "zenpm-"
+                and lfs.attributes(dir .. "/" .. entry, "mode") == "file" then
+            return dir .. "/" .. entry
+        end
+    end
+    return nil
+end
+
+-- Run "zenpm package update" (empty target = update all installed packages).
+-- Synchronous — CLI returns when done, exit 0 on success. Returns
+-- (ok:boolean, message:string). We don't need zen-pm's HTTP daemon for this:
+-- the CLI operates directly on state files and works whether the daemon is
+-- running or not.
+function Fetcher:runZenPMUpdate(binary)
+    -- shell-quote via double quotes with backslash-escaped inner quotes.
+    local function q(s) return '"' .. (s:gsub('"', '\\"')) .. '"' end
+    -- zen-pm expects ZENPM_PLATFORM; koreader is the correct value for us.
+    local cmd = "ZENPM_PLATFORM=koreader " .. q(binary)
+        .. " package update 2>&1"
+    self:_log("ZenPM: running " .. cmd)
+    local pipe = io.popen(cmd, "r")
+    if not pipe then return false, "ZenPM: failed to launch backend" end
+    local output = pipe:read("*a") or ""
+    local ok = pipe:close()
+    for line in output:gmatch("[^\r\n]+") do self:_log("ZenPM: " .. line) end
+    if ok then
+        return true, "ZenPM: updates applied ✓"
+    else
+        return false, "ZenPM: update failed — see Fetcher log"
+    end
+end
+
 -- Status bar helpers --------------------------------------------------------
 
 -- showStatus / closeStatus keep their old callers working, but they now drive
@@ -1206,19 +1260,38 @@ function Fetcher:_doSync()
         self:_log("OPDS: disabled in settings")
     end
 
-    -- Step 3: Plugins and patches (reported as separate lines)
+    -- Step 3: Plugins and patches
     local needs_restart = false
-    self:showStatus(_("Plugins & patches"), _("Checking for updates…"))
-    local pcall_ok, restart, plugin_line, patch_line = pcall(function() return self:syncSources() end)
-    if not pcall_ok then
-        table.insert(lines, "Plugins & patches: error — " .. tostring(restart))
-        self:_log("syncSources ERROR: " .. tostring(restart))
+    local zenpm_binary = self:hasZenPM()
+    if zenpm_binary then
+        -- Delegate everything plugin/patch-shaped to ZenPM. ZenPM's catalog
+        -- covers both, and having two tools race to manage the same install
+        -- is worse than picking one. Fetcher stays responsible for KOReader
+        -- OTA, OPDS books, and its own self-update.
+        self:showStatus(_("Plugins & patches"), _("Updating via ZenPM…"))
+        local ok_iter, ok_upd, msg = pcall(function() return self:runZenPMUpdate(zenpm_binary) end)
+        if not ok_iter then
+            table.insert(lines, "ZenPM: error — " .. tostring(ok_upd))
+        else
+            table.insert(lines, msg or "ZenPM: done")
+            -- ZenPM manages its own install/uninstall side-effects. We only
+            -- prompt for a restart if the user has extra Fetcher-managed
+            -- sources (which we still keep flexible to add later); today it's
+            -- safe to assume no restart is needed for a pure ZenPM delegation.
+        end
     else
-        table.insert(lines, plugin_line or _("Plugins: up to date ✓"))
-        table.insert(lines, patch_line or _("Patches: up to date ✓"))
-        self:_log("Plugins: " .. tostring(plugin_line or "up to date"))
-        self:_log("Patches: " .. tostring(patch_line or "up to date"))
-        needs_restart = restart or false
+        self:showStatus(_("Plugins & patches"), _("Checking for updates…"))
+        local pcall_ok, restart, plugin_line, patch_line = pcall(function() return self:syncSources() end)
+        if not pcall_ok then
+            table.insert(lines, "Plugins & patches: error — " .. tostring(restart))
+            self:_log("syncSources ERROR: " .. tostring(restart))
+        else
+            table.insert(lines, plugin_line or _("Plugins: up to date ✓"))
+            table.insert(lines, patch_line or _("Patches: up to date ✓"))
+            self:_log("Plugins: " .. tostring(plugin_line or "up to date"))
+            self:_log("Patches: " .. tostring(patch_line or "up to date"))
+            needs_restart = restart or false
+        end
     end
 
     -- If the sync hit GitHub's API rate limit part-way through, prepend a
