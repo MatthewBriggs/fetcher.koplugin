@@ -2,6 +2,20 @@
 
 All notable changes to Fetcher are documented here.
 
+## v0.11.0
+
+- **Font sync** from [nicoverbruggen/ebook-fonts](https://github.com/nicoverbruggen/ebook-fonts):
+  Fetcher can now install and keep updated a curated set of e-ink-optimised
+  fonts (KF-prefixed for Kobo, NV-prefixed for other devices, side-by-side with
+  the originals). Opt-in via **Fetcher → Settings → Enable font sync** — off by
+  default. Once enabled, if the fonts aren't installed, Fetcher installs them
+  next sync; from then on it re-downloads only when a new upstream release tag
+  is out. Picks the right pack per device (`kobo-core-fonts.zip` on Kobo,
+  `other-core-fonts.zip` on Kindle/Boox); a second toggle **Include extra font
+  pack** adds the "extra" variant.
+- Extraction is **additive** — any fonts you've dropped into KOReader's fonts
+  dir manually are left untouched.
+
 ## v0.10.1
 
 - **ZenPM delegation now differentiates plugins from patches** in the summary.

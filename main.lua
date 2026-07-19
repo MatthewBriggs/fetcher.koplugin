@@ -11,6 +11,13 @@ local _ = require("gettext")
 local SELF_REPO = "MatthewBriggs/fetcher.koplugin"
 local SELF_FILES = { "main.lua", "_meta.lua" }
 
+-- Fonts: nicoverbruggen/ebook-fonts ships a tag-versioned release per platform
+-- (`kobo-core-fonts.zip`, `kobo-extra-fonts.zip`, `other-core-fonts.zip`,
+-- `other-extra-fonts.zip`), each a FLAT zip of `.ttf` files. Fetcher picks the
+-- right asset for the device, extracts into KOReader's fonts dir, and only
+-- re-syncs when a new upstream tag is out.
+local FONT_REPO = "nicoverbruggen/ebook-fonts"
+
 -- Curated built-in plugin sources: popular KOReader plugins distributed as a
 -- single release .zip (or a release whose source zipball we fall back to).
 -- They are *offered*, not forced: one that is already installed is kept
@@ -562,6 +569,183 @@ function Fetcher:getSources()
         end
     end
     return sources
+end
+
+-- Ebook-fonts sync ----------------------------------------------------------
+
+-- Return the correct asset name for this device. Kobo uses kobo-*, everything
+-- else (Kindle, Boox, Android, desktop) uses other-*. `pack` is "core" or
+-- "extra"; the upstream ships those as separate archives so users can pick.
+function Fetcher:_fontAssetName(pack)
+    local Device = require("device")
+    local family = Device:isKobo() and "kobo" or "other"
+    return string.format("%s-%s-fonts.zip", family, pack)
+end
+
+-- Where fonts land. KOReader picks up any .ttf/.otf under `<data-dir>/fonts`
+-- (in addition to the device-wide system fonts dir on Kobo/Kindle).
+function Fetcher:_fontsDir()
+    return DataStorage:getDataDir() .. "/fonts"
+end
+
+-- Install (fresh or upgrade) ebook-fonts if enabled. Returns
+-- (ok, summary, needs_restart) so callers can drop it straight into the
+-- restart-prompt logic. Extracts *additively* — user's other fonts in the
+-- fonts dir are left alone.
+function Fetcher:syncFonts()
+    local T = require("ffi/util").template
+    if not self:getSetting("enable_font_sync", false) then
+        return true, nil, false -- disabled: don't touch, don't report
+    end
+
+    local https = require("ssl.https")
+    local ltn12 = require("ltn12")
+    local json = require("rapidjson")
+    local socket = require("socket")
+    local socketutil = require("socketutil")
+    local lfs = require("libs/libkoreader-lfs")
+    local ProgressbarDialog = require("ui/widget/progressbardialog")
+    local util = require("util")
+    local Archiver = require("ffi/archiver")
+
+    local gh_token = self:getGitHubToken()
+    local function apiHeaders()
+        local h = {
+            ["Accept"] = "application/vnd.github+json",
+            ["User-Agent"] = "Fetcher-KOReader",
+        }
+        if gh_token then h["Authorization"] = "token " .. gh_token end
+        return h
+    end
+
+    -- Fetch latest release tag.
+    self:showStatus(_("Fonts"), _("Checking latest release…"))
+    local chunks = {}
+    socketutil:set_timeout()
+    local _b, code = https.request{
+        url = "https://api.github.com/repos/" .. FONT_REPO .. "/releases/latest",
+        headers = apiHeaders(),
+        sink = ltn12.sink.table(chunks),
+    }
+    socketutil:reset_timeout()
+    if code ~= 200 then return false, "Fonts: release check failed", false end
+    local ok_json, release = pcall(json.decode, table.concat(chunks))
+    if not ok_json or not release or not release.tag_name then
+        return false, "Fonts: release parse failed", false
+    end
+
+    -- Skip if we already installed this tag (idempotent).
+    local installed_tags = self:getSetting("patch_installed_tags", {})
+    if installed_tags[FONT_REPO] == release.tag_name then
+        return true, _("Fonts: up to date ✓"), false
+    end
+
+    -- Pick the asset(s) to install: always "core", plus "extra" if opted in.
+    local packs = { "core" }
+    if self:getSetting("font_pack_extra", false) then
+        table.insert(packs, "extra")
+    end
+
+    local fetcher_tmp_dir = DataStorage:getDataDir() .. "/fetcher_tmp"
+    if not lfs.attributes(fetcher_tmp_dir) then lfs.mkdir(fetcher_tmp_dir) end
+    util.makePath(self:_fontsDir())
+
+    local extracted_files = 0
+    for _idx = 1, #packs do
+        local pack = packs[_idx]
+        local want_name = self:_fontAssetName(pack)
+        local asset
+        for _ai = 1, #(release.assets or {}) do
+            local a = release.assets[_ai]
+            if a.name == want_name then asset = a; break end
+        end
+        if not asset then
+            return false, string.format("Fonts: %s missing from release", want_name), false
+        end
+
+        -- Follow redirect (GitHub's asset URL redirects to a signed URL).
+        local final_url = asset.browser_download_url
+        do
+            local current = final_url
+            for _i = 1, 5 do
+                socketutil:set_timeout()
+                local _r, rc, rh = https.request{
+                    url = current, method = "HEAD",
+                    headers = { ["User-Agent"] = "Fetcher-KOReader" },
+                    sink = ltn12.sink.null(),
+                }
+                socketutil:reset_timeout()
+                if rc == 301 or rc == 302 or rc == 303 or rc == 307 or rc == 308 then
+                    local loc = rh and rh.location
+                    if not loc then break end
+                    current = loc
+                else
+                    break
+                end
+            end
+            final_url = current
+        end
+
+        local tmp_zip = fetcher_tmp_dir .. "/ebook-fonts-" .. pack .. ".zip"
+        local progress_dialog = ProgressbarDialog:new{
+            title = T(_("Downloading fonts (%1)"), pack),
+            subtitle = want_name,
+            progress_max = (asset.size and asset.size > 0) and asset.size or nil,
+            refresh_time_seconds = 1,
+        }
+        self:closeStatus()
+        progress_dialog:show()
+        UIManager:forceRePaint()
+
+        local file_sink = ltn12.sink.file(io.open(tmp_zip, "w"))
+        local progress_sink = socketutil.chainSinkWithProgressCallback(file_sink, function(bytes)
+            progress_dialog:reportProgress(bytes)
+        end)
+        socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
+        local dl_code = socket.skip(1, https.request{
+            url = final_url,
+            headers = { ["User-Agent"] = "Fetcher-KOReader", ["Accept-Encoding"] = "identity" },
+            sink = progress_sink,
+        })
+        socketutil:reset_timeout()
+        progress_dialog:close()
+
+        if dl_code ~= 200 then
+            os.remove(tmp_zip)
+            return false, string.format("Fonts (%s): download failed", pack), false
+        end
+
+        -- Extract directly into the fonts dir. Additive: any pre-existing
+        -- fonts the user put there manually are left untouched.
+        local reader = Archiver.Reader:new()
+        if not reader:open(tmp_zip) then
+            os.remove(tmp_zip)
+            return false, string.format("Fonts (%s): archive open failed", pack), false
+        end
+        local extracted_here = 0
+        for entry in reader:iterate() do
+            if entry.mode == "file" then
+                -- Reject path traversal defensively (upstream is flat but paranoia is cheap).
+                local rel = entry.path
+                if rel:find("%.%.") or rel:sub(1, 1) == "/" then
+                    reader:close(); os.remove(tmp_zip)
+                    return false, "Fonts: archive rejected (unsafe path)", false
+                end
+                local dest = self:_fontsDir() .. "/" .. rel:match("([^/]+)$")
+                if reader:extractToPath(entry.path, dest) then
+                    extracted_here = extracted_here + 1
+                end
+            end
+        end
+        reader:close()
+        os.remove(tmp_zip)
+        extracted_files = extracted_files + extracted_here
+        self:_log(string.format("Fonts (%s): %d files extracted", pack, extracted_here))
+    end
+
+    installed_tags[FONT_REPO] = release.tag_name
+    self:saveSetting("patch_installed_tags", installed_tags)
+    return true, T(_("Fonts: %1 files installed ✓"), extracted_files), true
 end
 
 -- Sync all sources: plugins (whole-plugin updates, incl. Fetcher itself) and
@@ -1315,8 +1499,21 @@ function Fetcher:_doSync()
         self:_log("OPDS: disabled in settings")
     end
 
-    -- Step 3: Plugins and patches
+    -- Step 3: Fonts (opt-in, off by default). Runs before plugin+patch step
+    -- because a font install often needs a restart, and we'd rather roll all
+    -- restart-triggers into one prompt at the end.
     local needs_restart = false
+    local pcall_ok_f, ok_f, font_msg, font_restart = pcall(function() return self:syncFonts() end)
+    if not pcall_ok_f then
+        table.insert(lines, "Fonts: error — " .. tostring(ok_f))
+        self:_log("syncFonts ERROR: " .. tostring(ok_f))
+    elseif font_msg then
+        table.insert(lines, font_msg)
+        self:_log("Fonts: " .. tostring(font_msg))
+        if font_restart then needs_restart = true end
+    end
+
+    -- Step 4: Plugins and patches
     local zenpm_binary = self:hasZenPM()
     if zenpm_binary then
         -- Delegate everything plugin/patch-shaped to ZenPM. ZenPM's catalog
@@ -1484,6 +1681,54 @@ function Fetcher:addToMainMenu(menu_items)
                         callback = function()
                             local v = self:getSetting("opds_force_resync", false)
                             self:saveSetting("opds_force_resync", not v)
+                        end,
+                    },
+                    {
+                        text_func = function()
+                            local tags = self:getSetting("patch_installed_tags", {})
+                            local ver = tags[FONT_REPO]
+                            if ver then
+                                return _("Enable font sync") .. "  (" .. ver .. ")"
+                            end
+                            return _("Enable font sync") .. "  (nicoverbruggen/ebook-fonts)"
+                        end,
+                        checked_func = function()
+                            return self:getSetting("enable_font_sync", false)
+                        end,
+                        callback = function()
+                            local v = self:getSetting("enable_font_sync", false)
+                            self:saveSetting("enable_font_sync", not v)
+                        end,
+                        separator = false,
+                    },
+                    {
+                        text = _("Include extra font pack"),
+                        enabled_func = function()
+                            return self:getSetting("enable_font_sync", false)
+                        end,
+                        checked_func = function()
+                            return self:getSetting("font_pack_extra", false)
+                        end,
+                        callback = function()
+                            local v = self:getSetting("font_pack_extra", false)
+                            self:saveSetting("font_pack_extra", not v)
+                        end,
+                    },
+                    {
+                        text = _("Force re-download fonts on next sync"),
+                        enabled_func = function()
+                            return self:getSetting("enable_font_sync", false)
+                        end,
+                        callback = function()
+                            -- Clear the recorded tag so the next sync sees a
+                            -- version mismatch and re-installs.
+                            local tags = self:getSetting("patch_installed_tags", {})
+                            tags[FONT_REPO] = nil
+                            self:saveSetting("patch_installed_tags", tags)
+                            local InfoMessage = require("ui/widget/infomessage")
+                            UIManager:show(InfoMessage:new{
+                                text = _("Fonts will be re-downloaded on next sync."),
+                            })
                         end,
                     },
                     {

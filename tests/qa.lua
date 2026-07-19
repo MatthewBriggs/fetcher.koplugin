@@ -218,6 +218,12 @@ preload("ui/otamanager", {
     fetchAndProcessUpdate = function() end,
 })
 preload("dispatcher", { registerAction = function() end, execute = function() end, menuTextFunc = function() return "x" end })
+-- Fake Device: tests can flip DEVICE_IS_KOBO to change what syncFonts picks.
+DEVICE_IS_KOBO = true
+preload("device", {
+    isKobo = function() return DEVICE_IS_KOBO end,
+    isKindle = function() return not DEVICE_IS_KOBO end,
+})
 preload("opdsbrowser", { new = function() return { fillPendingSyncs = function() end, pending_syncs = {} } end })
 
 -- WidgetContainer:extend metaclass.
@@ -735,6 +741,75 @@ do
     f.getSelfDir = function() return WORK .. "/no-such-plugin-dir/" end
     ok("getSelfVersion falls back to 'unknown' when meta is missing",
         f:getSelfVersion() == "unknown")
+end
+
+print("\n== Font sync (nicoverbruggen/ebook-fonts) ==")
+do
+    rmrf(SETTINGS); mkdirp(SETTINGS); rmrf(PLUGINS); mkdirp(PLUGINS); rmrf(DATA); mkdirp(DATA)
+    resetInjection()
+    local f = newInstance()
+
+    -- Disabled by default: no network, no return message, no restart flag.
+    local ok_d, msg_d, restart_d = f:syncFonts()
+    ok("disabled by default: ok=true", ok_d == true)
+    ok("disabled by default: no message", msg_d == nil)
+    ok("disabled by default: no restart", restart_d == false)
+
+    -- Enable and simulate an unreleased tag → downloads + extracts.
+    f:saveSetting("enable_font_sync", true)
+    DEVICE_IS_KOBO = true
+    local REL = "https://api.github.com/repos/nicoverbruggen/ebook-fonts/releases/latest"
+    FIXTURES = { [REL] = {
+        tag_name = "v2026.07.02",
+        assets = {
+            { name = "kobo-core-fonts.zip",
+              browser_download_url = "https://dl/kobo-core.zip", size = 1234 },
+            { name = "kobo-extra-fonts.zip",
+              browser_download_url = "https://dl/kobo-extra.zip", size = 5678 },
+        },
+    } }
+    ARCHIVE_ENTRIES = {
+        [DATA .. "/fetcher_tmp/ebook-fonts-core.zip"] = {
+            { path = "KF_Bitter-Regular.ttf",  mode = "file" },
+            { path = "KF_Bitter-Bold.ttf",     mode = "file" },
+        },
+    }
+
+    local ok_i, msg_i, restart_i = f:syncFonts()
+    ok("install: ok=true", ok_i == true, tostring(msg_i))
+    ok("install: message mentions installed count", msg_i and msg_i:find("2 files installed"),
+        tostring(msg_i))
+    ok("install: prompts restart", restart_i == true)
+    ok("install: stored tag matches release", f:getSetting("patch_installed_tags", {})["nicoverbruggen/ebook-fonts"] == "v2026.07.02")
+    ok("install: files landed in fonts dir",
+        exists(DATA .. "/fonts/KF_Bitter-Regular.ttf") and exists(DATA .. "/fonts/KF_Bitter-Bold.ttf"))
+
+    -- Second run: same tag → idempotent, up-to-date message, no restart.
+    local ok_u, msg_u, restart_u = f:syncFonts()
+    ok("idempotent: reports up to date", msg_u == "Fonts: up to date ✓", tostring(msg_u))
+    ok("idempotent: no restart", restart_u == false)
+
+    -- Kindle branch: extra pack also selected → picks other-* + downloads both.
+    rmrf(SETTINGS); mkdirp(SETTINGS); rmrf(DATA); mkdirp(DATA)
+    f = newInstance()
+    f:saveSetting("enable_font_sync", true)
+    f:saveSetting("font_pack_extra", true)
+    DEVICE_IS_KOBO = false
+    FIXTURES = { [REL] = {
+        tag_name = "v2026.07.03",
+        assets = {
+            { name = "other-core-fonts.zip",  browser_download_url = "https://dl/oc.zip", size = 1 },
+            { name = "other-extra-fonts.zip", browser_download_url = "https://dl/oe.zip", size = 1 },
+        },
+    } }
+    ARCHIVE_ENTRIES = {
+        [DATA .. "/fetcher_tmp/ebook-fonts-core.zip"]  = { { path = "core1.ttf",  mode = "file" } },
+        [DATA .. "/fetcher_tmp/ebook-fonts-extra.zip"] = { { path = "extra1.ttf", mode = "file" } },
+    }
+    local ok_k, msg_k = f:syncFonts()
+    ok("kindle+extra: ok=true", ok_k == true, tostring(msg_k))
+    ok("kindle+extra: core file extracted", exists(DATA .. "/fonts/core1.ttf"))
+    ok("kindle+extra: extra file extracted", exists(DATA .. "/fonts/extra1.ttf"))
 end
 
 print("\n== ZenPM delegation ==")
